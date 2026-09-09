@@ -84,11 +84,17 @@ pub async fn download_model(app: AppHandle, id: String) -> Result<String, String
         .map_err(|e| e.to_string())?;
 
     // Сразу прописываем путь в настройки — пользователю не надо копировать его руками.
+    // Чтение, запись на диск и обновление состояния — одна критическая секция:
+    // иначе между чтением клона и записью обратно можно потерять правку,
+    // которую пользователь успел сохранить через save_settings, пока модель качалась.
     let state = app.state::<AppState>();
-    let mut s = state.settings.lock().unwrap().clone();
-    s.model_path = Some(path.clone());
-    settings::save(&dir, &s).map_err(|e| e.to_string())?;
-    *state.settings.lock().unwrap() = s;
+    {
+        let mut guard = state.settings.lock().unwrap();
+        let mut candidate = guard.clone();
+        candidate.model_path = Some(path.clone());
+        settings::save(&dir, &candidate).map_err(|e| e.to_string())?;
+        *guard = candidate;
+    }
 
     Ok(path.to_string_lossy().to_string())
 }
