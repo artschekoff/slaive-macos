@@ -3,27 +3,31 @@ import { listen } from '@tauri-apps/api/event'
 import {
   copyText,
   hideOverlay,
-  openAccessibilitySettings,
+  openPrivacyPane,
   pasteText,
   startRecording,
   stopRecording,
+  type PrivacyPane,
 } from './api'
 
 type Phase = 'idle' | 'recording' | 'transcribing' | 'ready' | 'error'
 
 const LABEL: Record<Phase, string> = {
-  idle: 'Зажми хоткей и говори',
-  recording: 'Записываю…',
-  transcribing: 'Расшифровываю…',
-  ready: 'Готово — «Вставить» вернёт текст в исходное окно',
-  error: 'Ошибка',
+  idle: 'Hold the hotkey and speak',
+  recording: 'Recording…',
+  transcribing: 'Transcribing…',
+  ready: 'Done — Paste sends the text back to where you were',
+  error: 'Error',
 }
+
+type AccessibilityErrorPayload = { message: string; pane: PrivacyPane }
 
 export function Overlay() {
   const [phase, setPhase] = useState<Phase>('idle')
   const [text, setText] = useState('')
   const [error, setError] = useState('')
-  const [needsAccessibility, setNeedsAccessibility] = useState(false)
+  const [permissionPane, setPermissionPane] = useState<PrivacyPane | null>(null)
+  const [copied, setCopied] = useState(false)
 
   useEffect(() => {
     const subs = [
@@ -31,7 +35,7 @@ export function Overlay() {
         setPhase('recording')
         setText('')
         setError('')
-        setNeedsAccessibility(false)
+        setPermissionPane(null)
       }),
       listen('rec:stop', () => setPhase('transcribing')),
       listen<string>('transcript', (e) => {
@@ -43,11 +47,11 @@ export function Overlay() {
         setPhase('error')
         // Обычная ошибка может прийти после отказа в правах — флаг из того
         // случая не должен пережить её и оставить лишнюю кнопку в панели.
-        setNeedsAccessibility(false)
+        setPermissionPane(null)
       }),
-      listen<string>('error:accessibility', (e) => {
-        setError(e.payload)
-        setNeedsAccessibility(true)
+      listen<AccessibilityErrorPayload>('error:accessibility', (e) => {
+        setError(e.payload.message)
+        setPermissionPane(e.payload.pane)
         setPhase('error')
       }),
     ]
@@ -72,6 +76,30 @@ export function Overlay() {
     else startRecording()
   }
 
+  // I6: провал вставки/копирования раньше не производил вообще ничего —
+  // успех и отказ были неотличимы. Отказ идёт в уже существующую
+  // поверхность ошибок, успех копирования — во временное подтверждение.
+  const onPaste = () => {
+    pasteText(text).catch((e) => {
+      setError(String(e))
+      setPhase('error')
+      setPermissionPane(null)
+    })
+  }
+
+  const onCopy = () => {
+    copyText(text)
+      .then(() => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      })
+      .catch((e) => {
+        setError(String(e))
+        setPhase('error')
+        setPermissionPane(null)
+      })
+  }
+
   return (
     <div className="overlay">
       <div className="row">
@@ -85,15 +113,15 @@ export function Overlay() {
       </div>
       <div className="transcript">{text || <span className="dim">—</span>}</div>
       <div className="actions">
-        <button className="primary" disabled={!text} onClick={() => pasteText(text)}>
-          Вставить
+        <button className="primary" disabled={!text} onClick={onPaste}>
+          Paste
         </button>
-        <button disabled={!text} onClick={() => copyText(text)}>
-          Копировать
+        <button disabled={!text} onClick={onCopy}>
+          {copied ? 'Copied' : 'Copy'}
         </button>
-        <button onClick={() => hideOverlay()}>Закрыть</button>
-        {needsAccessibility && (
-          <button onClick={() => openAccessibilitySettings()}>Открыть настройки</button>
+        <button onClick={() => hideOverlay()}>Close</button>
+        {permissionPane && (
+          <button onClick={() => openPrivacyPane(permissionPane)}>Open Settings</button>
         )}
       </div>
     </div>

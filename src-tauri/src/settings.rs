@@ -36,9 +36,9 @@ pub fn load(dir: &Path) -> Settings {
 }
 
 pub fn save(dir: &Path, s: &Settings) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dir).context("не удалось создать папку настроек")?;
+    std::fs::create_dir_all(dir).context("Couldn't create the settings folder.")?;
     let raw = serde_json::to_string_pretty(s)?;
-    std::fs::write(dir.join(FILE_NAME), raw).context("не удалось записать настройки")?;
+    std::fs::write(dir.join(FILE_NAME), raw).context("Couldn't write settings to disk.")?;
     Ok(())
 }
 
@@ -46,10 +46,10 @@ pub fn save(dir: &Path, s: &Settings) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    // ponytail: brief's tmp() keyed only by process::id(), which is identical
-    // for every test in this binary — under cargo's default parallel test
-    // threads, tests raced on the same directory and flaked. Added thread id
-    // to keep each concurrently-running test isolated; assertions unchanged.
+    // tmp() из брифа использовал только process::id(), который одинаков для
+    // всех тестов в этом бинарнике — при параллельных потоках cargo тесты
+    // гонялись за одну и ту же папку и флакали. Добавлен id потока, чтобы
+    // каждый параллельно выполняющийся тест был изолирован; проверки не менялись.
     fn tmp() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "slaive-test-{}-{:?}",

@@ -55,6 +55,23 @@ button.primary {
 
 .ok { color: #30d158; font-size: 12px; }
 
+.hotkey-capture {
+  align-self: flex-start;
+  min-width: 180px;
+  background: #2c2c2e;
+  border: 1px solid #3a3a3c;
+  border-radius: 6px;
+  color: #f2f2f7;
+  padding: 8px 10px;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.hotkey-capture.recording {
+  border-color: #0a84ff;
+  color: #0a84ff;
+}
+
 .download { display: flex; gap: 8px; align-items: center; }
 .download select { flex: 1; }
 .download button {

@@ -45,13 +45,13 @@ pub fn resample_to_16k(input: &[f32], from_rate: u32) -> Vec<f32> {
 /// поэтому он не может жить в состоянии Tauri напрямую.
 pub struct Recorder {
     stop_tx: mpsc::Sender<()>,
-    done_rx: mpsc::Receiver<Vec<f32>>,
+    done_rx: mpsc::Receiver<anyhow::Result<Vec<f32>>>,
 }
 
 impl Recorder {
     pub fn start() -> anyhow::Result<Self> {
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
-        let (done_tx, done_rx) = mpsc::channel::<Vec<f32>>();
+        let (done_tx, done_rx) = mpsc::channel::<anyhow::Result<Vec<f32>>>();
         let (init_tx, init_rx) = mpsc::channel::<anyhow::Result<()>>();
 
         std::thread::spawn(move || {
@@ -60,13 +60,15 @@ impl Recorder {
             let built = (|| -> anyhow::Result<(cpal::Stream, u32, u16)> {
                 let device = cpal::default_host()
                     .default_input_device()
-                    .ok_or_else(|| anyhow!("микрофон не найден"))?;
+                    .ok_or_else(|| anyhow!("no input device found"))?;
                 let config = device
                     .default_input_config()
-                    .context("не удалось получить настройки микрофона")?;
+                    .context("couldn't read input device configuration")?;
                 let sample_rate = config.sample_rate().0;
                 let channels = config.channels();
                 let sink = buffer.clone();
+                // ponytail: поддерживаем только f32-вход, добавить ветки
+                // i16/u16, если появится устройство, которое на этом падает.
                 let stream = device
                     .build_input_stream(
                         &config.into(),
@@ -78,8 +80,8 @@ impl Recorder {
                         |err| eprintln!("ошибка потока микрофона: {err}"),
                         None,
                     )
-                    .context("не удалось открыть поток микрофона")?;
-                stream.play().context("не удалось запустить запись")?;
+                    .context("couldn't open the microphone stream")?;
+                stream.play().context("couldn't start the microphone stream")?;
                 Ok((stream, sample_rate, channels))
             })();
 
@@ -98,12 +100,22 @@ impl Recorder {
             let _ = stop_rx.recv();
             drop(stream);
 
-            let raw = buffer.lock().map(|b| b.clone()).unwrap_or_default();
+            // M8: отравленный мьютекс — это потерянное аудио, а не тишина.
+            // unwrap_or_default() раньше превращал его в пустую «успешную»
+            // запись, которая ниже по потоку выглядела как «слишком короткая
+            // запись» — сообщение врало, а виноватым выставляли пользователя.
+            let raw = match buffer.lock() {
+                Ok(b) => b.clone(),
+                Err(_) => {
+                    let _ = done_tx.send(Err(anyhow!("audio buffer was poisoned — recording lost")));
+                    return;
+                }
+            };
             let mono = to_mono(&raw, channels);
-            let _ = done_tx.send(resample_to_16k(&mono, sample_rate));
+            let _ = done_tx.send(Ok(resample_to_16k(&mono, sample_rate)));
         });
 
-        init_rx.recv().context("поток записи не запустился")??;
+        init_rx.recv().context("recording thread didn't start")??;
         Ok(Self { stop_tx, done_rx })
     }
 
@@ -112,11 +124,9 @@ impl Recorder {
         let _ = self.stop_tx.send(());
         self.done_rx
             .recv()
-            .context("поток записи завершился без результата")
+            .context("recording thread finished without a result")?
     }
 }
-
-// ponytail: поддерживаем только f32-вход, добавить ветки i16/u16 если появится устройство, которое падает
 
 #[cfg(test)]
 mod tests {
@@ -138,6 +148,16 @@ mod tests {
     #[test]
     fn mono_handles_empty() {
         assert!(to_mono(&[], 2).is_empty());
+    }
+
+    /// T2: длина не кратна числу каналов. `chunks_exact` молча выбрасывает
+    /// хвостовой неполный кадр — проверяем, что это ожидаемое поведение,
+    /// а не забытый сэмпл.
+    #[test]
+    fn to_mono_drops_incomplete_trailing_frame() {
+        // 5 сэмплов на 2 канала: последний сэмпл не образует полный кадр.
+        let input = [0.0_f32, 1.0, -1.0, 1.0, 0.5];
+        assert_eq!(to_mono(&input, 2), vec![0.5, 0.0]);
     }
 
     #[test]
@@ -164,5 +184,20 @@ mod tests {
     #[test]
     fn resample_handles_empty() {
         assert!(resample_to_16k(&[], 48_000).is_empty());
+    }
+
+    /// T1: все прежние тесты гоняли константный сигнал, на котором
+    /// перестановка, дублирование или пропуск сэмплов остались бы
+    /// незамеченными. Возрастающая рампа ловит именно такой баг.
+    #[test]
+    fn resample_preserves_monotonic_ramp() {
+        let input: Vec<f32> = (0..48_000).map(|i| i as f32).collect();
+        let out = resample_to_16k(&input, 48_000);
+        assert_eq!(out.len(), 16_000);
+        // Возрастающий вход обязан остаться возрастающим: перестановка,
+        // дублирование или пропуск сэмплов это нарушат.
+        assert!(out.windows(2).all(|w| w[1] > w[0]));
+        // Первое окно усредняет сэмплы 0,1,2 → 1.0
+        assert!((out[0] - 1.0).abs() < 1e-3);
     }
 }

@@ -28,7 +28,8 @@ fn main() {
             commands::stop_recording,
             commands::paste_text,
             commands::copy_text,
-            commands::open_accessibility_settings,
+            commands::open_privacy_pane,
+            commands::validate_hotkey,
         ])
         .setup(|app| {
             let dir = commands::data_dir(app.handle())?;
@@ -44,6 +45,13 @@ fn main() {
                 .clone();
             if let Err(e) = commands::register_hotkey(app.handle(), &hotkey) {
                 eprintln!("хоткей не зарегистрирован: {e}");
+                // register_hotkey сам выставляет hotkey_ok только в true (при
+                // успехе смены хоткея прежний рабочий не должен помечаться
+                // как сломанный из-за неудачной попытки). Только здесь, на
+                // старте, провал реально означает «хоткей не работает вообще»
+                // — предыдущей рабочей регистрации не было и взять флаг
+                // неоткуда, кроме как выставить его явно.
+                *app.state::<state::AppState>().hotkey_ok.lock().unwrap() = false;
             }
 
             // Без модели приложение бесполезно — сразу показываем настройки.
@@ -58,8 +66,8 @@ fn main() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            let settings_item = MenuItemBuilder::with_id("settings", "Настройки…").build(app)?;
-            let quit_item = MenuItemBuilder::with_id("quit", "Выход").build(app)?;
+            let settings_item = MenuItemBuilder::with_id("settings", "Settings…").build(app)?;
+            let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app)
                 .items(&[&settings_item, &quit_item])
                 .build()?;

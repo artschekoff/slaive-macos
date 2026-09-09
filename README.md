@@ -1,46 +1,51 @@
 # Slaive
 
-Голосовой ввод поверх любого приложения на macOS. Локально, без облака.
+Voice input over any app on macOS. Local, no cloud.
 
-Зажми `Ctrl+Space`, говори, отпусти — текст появится в панели.
-Кнопка «Вставить» вернёт его в то приложение, из которого ты вызвал Slaive.
+Hold the hotkey, speak, release — the text appears in the panel.
+The "Paste" button sends it back to the app you called Slaive from.
 
-## Требования
+## Requirements
 
 - macOS 12+
 - Rust, cmake (`brew install cmake`), Node.js 20+
 
-## Запуск
+## Running
 
 ```bash
 npm install
 npm run tauri dev
 ```
 
-При первом запуске откроются настройки: выбери модель и нажми «Скачать».
-Для русского языка бери `small` или `large-v3-turbo` — модели с суффиксом `.en`
-русский не понимают.
+Settings open automatically on first launch: pick a model and click "Download".
+For Russian, use `small` or `large-v3-turbo` — models with the `.en` suffix
+don't understand Russian.
 
-## Разрешения macOS
+## macOS Permissions
 
-Приложению нужны два доступа:
+The app needs two permissions:
 
-- **Микрофон** — запрашивается автоматически при первой записи.
-- **Универсальный доступ** — чтобы вставлять текст в чужие окна.
-  Системные настройки → Конфиденциальность и безопасность → Универсальный доступ.
+- **Microphone** — requested automatically on the first recording.
+- **Accessibility** — to paste text into other apps.
+  System Settings → Privacy & Security → Accessibility.
 
-## Конфликт хоткея
+The first time Slaive brings a window back into focus, macOS may also ask for
+**Automation** access (System Settings → Privacy & Security → Automation →
+Slaive → System Events) — grant that too.
 
-`Ctrl+Space` в macOS по умолчанию переключает раскладку. Либо отключи это в
-«Клавиатура → Сочетания клавиш → Источники ввода», либо задай другую комбинацию
-в настройках Slaive.
+## Hotkey conflict
 
-## Сборка
+The default hotkey is set by pressing a key combination in Slaive's settings.
+On macOS, `Ctrl+Space` is taken by Input Source switching by default. Either
+turn that off in "Keyboard → Keyboard Shortcuts → Input Sources", or set a
+different combination in Slaive's settings.
+
+## Building
 
 ```bash
 npm run tauri build
 ```
 
-Готовое приложение — в `src-tauri/target/release/bundle/macos/Slaive.app`.
-Сборка не подписана: при первом открытии macOS попросит подтвердить запуск через
-контекстное меню → «Открыть».
+The built app lands in `src-tauri/target/release/bundle/macos/Slaive.app`.
+The build is unsigned: on first launch, macOS will ask you to confirm via the
+right-click menu → "Open".

@@ -3,8 +3,8 @@
 <plist version="1.0">
 <dict>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Slaive записывает голос, чтобы расшифровать его в текст локально на этом компьютере.</string>
+    <string>Slaive records your voice to transcribe it to text locally on this computer.</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>Slaive вставляет распознанный текст в приложение, из которого его вызвали.</string>
+    <string>Slaive pastes the transcribed text into the app you called it from.</string>
 </dict>
 </plist>

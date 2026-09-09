@@ -34,22 +34,21 @@ impl Transcriber {
     pub fn load(model_path: &Path) -> anyhow::Result<Self> {
         if !model_path.exists() {
             return Err(anyhow!(
-                "модель не найдена: {}",
-                model_path.to_string_lossy()
+                "Model file not found. Open Settings and download it again."
             ));
         }
         let ctx = WhisperContext::new_with_params(
             &model_path.to_string_lossy(),
             WhisperContextParameters::default(),
         )
-        .context("не удалось загрузить модель whisper")?;
+        .context("Couldn't load the whisper model. Try downloading it again in Settings.")?;
         Ok(Self { ctx })
     }
 
     /// `pcm` должен быть f32, 16 кГц, моно. `language` — "auto", "ru" или "en".
     pub fn transcribe(&self, pcm: &[f32], language: &str) -> anyhow::Result<String> {
         if pcm.len() < MIN_SAMPLES {
-            return Err(anyhow!("слишком короткая запись — говори дольше"));
+            return Err(anyhow!("Recording too short — hold the hotkey and speak longer."));
         }
 
         // `lang` объявлен до `params`, потому что FullParams заимствует эту строку.
@@ -70,16 +69,21 @@ impl Transcriber {
         let mut state = self
             .ctx
             .create_state()
-            .context("не удалось создать состояние whisper")?;
+            .context("Couldn't initialize the whisper engine.")?;
         state
             .full(params, pcm)
-            .context("не удалось расшифровать запись")?;
+            .context("Couldn't transcribe the recording.")?;
 
         let n = state
             .full_n_segments()
-            .context("не удалось получить сегменты")?;
+            .context("Couldn't read transcription segments.")?;
         let mut segments = Vec::with_capacity(n as usize);
         for i in 0..n {
+            // ponytail: сегмент, который whisper.cpp не смог отдать текстом,
+            // тихо пропускаем вместо прерывания всей расшифровки — одна
+            // испорченная реплика не должна стоить пользователю всей записи.
+            // Усложнить, если окажется, что это происходит не только на
+            // мусорном/пустом аудио.
             segments.push(state.full_get_segment_text(i).unwrap_or_default());
         }
         Ok(join_segments(&segments))

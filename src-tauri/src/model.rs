@@ -17,9 +17,9 @@ pub struct ModelInfo {
 
 /// Мультиязычные модели: английские (.en) не понимают русский.
 pub const CATALOG: &[ModelInfo] = &[
-    ModelInfo { id: "base", label: "Base — быстрая, слабее на русском", size_mb: 148 },
-    ModelInfo { id: "small", label: "Small — рекомендуется", size_mb: 488 },
-    ModelInfo { id: "large-v3-turbo", label: "Large v3 Turbo — лучшее качество", size_mb: 1620 },
+    ModelInfo { id: "base", label: "Base — fast, weaker on Russian", size_mb: 148 },
+    ModelInfo { id: "small", label: "Small — recommended", size_mb: 488 },
+    ModelInfo { id: "large-v3-turbo", label: "Large v3 Turbo — best quality", size_mb: 1620 },
 ];
 
 pub fn file_name(id: &str) -> String {
@@ -46,18 +46,30 @@ struct Progress {
 /// Пишет во временный `.part` и переименовывает только после успеха —
 /// прерванная загрузка не оставит битый файл, который выглядит как рабочий.
 pub async fn download(app: &AppHandle, dir: &Path, id: &str) -> anyhow::Result<PathBuf> {
-    let url = url_for(id).ok_or_else(|| anyhow!("неизвестная модель: {id}"))?;
+    let url = url_for(id).ok_or_else(|| anyhow!("Unknown model: {id}."))?;
     let models_dir = dir.join("models");
     tokio::fs::create_dir_all(&models_dir).await?;
 
     let final_path = models_dir.join(file_name(id));
     let part_path = models_dir.join(format!("{}.part", file_name(id)));
 
-    let response = reqwest::get(&url)
+    // I9: без явных таймаутов зависшее соединение оставляло пользователя
+    // смотреть на «Downloading…» без полосы, без отмены и без ошибки —
+    // бесконечно. connect_timeout ловит недоступный сервер, read_timeout —
+    // застрявшее соединение посреди уже начатой загрузки.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("Couldn't create the download client.")?;
+
+    let response = client
+        .get(&url)
+        .send()
         .await
-        .context("не удалось связаться с huggingface.co")?
+        .context("Couldn't reach huggingface.co. Check your internet connection and try again.")?
         .error_for_status()
-        .context("сервер вернул ошибку при скачивании модели")?;
+        .context("The server returned an error while downloading the model. Try again later.")?;
 
     let total = response.content_length().unwrap_or(0);
     let mut downloaded: u64 = 0;
@@ -66,7 +78,7 @@ pub async fn download(app: &AppHandle, dir: &Path, id: &str) -> anyhow::Result<P
     let mut stream = response.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("обрыв соединения при скачивании")?;
+        let chunk = chunk.context("Connection dropped during download. Try again.")?;
         file.write_all(&chunk).await?;
         downloaded += chunk.len() as u64;
         // Событие не чаще, чем раз на мегабайт — иначе UI захлебнётся.

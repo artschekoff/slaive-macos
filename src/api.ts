@@ -6,7 +6,12 @@ export type Settings = {
   language: 'auto' | 'ru' | 'en'
 }
 
-export const getSettings = () => invoke<Settings>('get_settings')
+export type SettingsResponse = Settings & {
+  /** C1.4: false, если последняя попытка зарегистрировать хоткей провалилась. */
+  hotkeyOk: boolean
+}
+
+export const getSettings = () => invoke<SettingsResponse>('get_settings')
 export const saveSettings = (settings: Settings) => invoke<void>('save_settings', { settings })
 export const hideOverlay = () => invoke<void>('hide_overlay')
 
@@ -21,4 +26,9 @@ export const stopRecording = () => invoke<void>('stop_recording')
 
 export const pasteText = (text: string) => invoke<void>('paste_text', { text })
 export const copyText = (text: string) => invoke<void>('copy_text', { text })
-export const openAccessibilitySettings = () => invoke<void>('open_accessibility_settings')
+
+export type PrivacyPane = 'automation' | 'accessibility'
+export const openPrivacyPane = (pane: PrivacyPane) => invoke<void>('open_privacy_pane', { pane })
+
+/** C1 / hotkey capture: разбирает строку через global-hotkey, не регистрируя её. */
+export const validateHotkey = (hotkey: string) => invoke<void>('validate_hotkey', { hotkey })
