@@ -8,3 +8,49 @@ body {
 }
 
 .placeholder { padding: 16px; }
+
+.settings {
+  background: #1c1c1e;
+  min-height: 100vh;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  user-select: text;
+}
+
+.settings h1 { font-size: 18px; font-weight: 600; }
+
+.settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: #a1a1a6;
+}
+
+.settings input,
+.settings select {
+  background: #2c2c2e;
+  border: 1px solid #3a3a3c;
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: #f2f2f7;
+  font-size: 13px;
+}
+
+.hint { font-size: 12px; color: #8e8e93; line-height: 1.4; }
+.hint code { background: #2c2c2e; padding: 1px 4px; border-radius: 3px; }
+
+button.primary {
+  align-self: flex-start;
+  background: #0a84ff;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ok { color: #30d158; font-size: 12px; }

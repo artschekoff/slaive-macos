@@ -1,5 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod commands;
+mod settings;
+mod state;
+
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
@@ -9,7 +13,15 @@ use tauri::{
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .invoke_handler(tauri::generate_handler![
+            commands::get_settings,
+            commands::save_settings,
+        ])
         .setup(|app| {
+            let dir = commands::data_dir(app.handle())?;
+            let loaded = settings::load(&dir);
+            app.manage(state::AppState::new(loaded));
+
             // Меню-бар приложение: без иконки в доке и без переключения по Cmd+Tab.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
