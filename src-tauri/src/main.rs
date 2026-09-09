@@ -5,6 +5,7 @@ mod commands;
 mod model;
 mod settings;
 mod state;
+mod whisper;
 
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},

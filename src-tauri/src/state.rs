@@ -1,5 +1,6 @@
 use crate::audio::Recorder;
 use crate::settings::Settings;
+use crate::whisper::Transcriber;
 use std::sync::Mutex;
 
 pub struct AppState {
@@ -14,6 +15,11 @@ pub struct AppState {
     // читает — поле объявлено сейчас по контракту интерфейса.
     #[allow(dead_code)]
     pub recorder: Mutex<Option<Recorder>>,
+    /// Загруженная модель whisper, если она уже загружена.
+    // ponytail: до Task 7 (склейка с хоткеем и записью) сюда никто не
+    // пишет и не читает — поле объявлено сейчас по контракту интерфейса.
+    #[allow(dead_code)]
+    pub transcriber: Mutex<Option<Transcriber>>,
 }
 
 impl AppState {
@@ -22,6 +28,7 @@ impl AppState {
             settings: Mutex::new(settings),
             prev_app_pid: Mutex::new(None),
             recorder: Mutex::new(None),
+            transcriber: Mutex::new(None),
         }
     }
 }
