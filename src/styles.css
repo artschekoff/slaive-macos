@@ -100,6 +100,8 @@ button.primary {
   animation: pulse 1.2s ease-in-out infinite;
 }
 
+.overlay .mic.busy { opacity: 0.4; cursor: default; }
+
 @keyframes pulse {
   50% { opacity: 0.55; }
 }

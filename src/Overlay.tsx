@@ -48,6 +48,9 @@ export function Overlay() {
   }, [])
 
   const toggleMic = () => {
+    // Во время расшифровки микрофон неактивен: предыдущая запись ещё
+    // обрабатывается, и вторая перетёрла бы её результат.
+    if (phase === 'transcribing') return
     if (phase === 'recording') stopRecording()
     else startRecording()
   }
@@ -55,7 +58,10 @@ export function Overlay() {
   return (
     <div className="overlay">
       <div className="row">
-        <div className={`mic ${phase === 'recording' ? 'live' : ''}`} onClick={toggleMic}>
+        <div
+          className={`mic ${phase === 'recording' ? 'live' : ''} ${phase === 'transcribing' ? 'busy' : ''}`}
+          onClick={toggleMic}
+        >
           🎤
         </div>
         <div className="status">{phase === 'error' ? error : LABEL[phase]}</div>
