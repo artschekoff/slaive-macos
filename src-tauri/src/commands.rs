@@ -64,6 +64,14 @@ pub fn emit_error(app: &AppHandle, message: impl Into<String>) {
     let _ = app.emit_to("overlay", "error", message);
 }
 
+/// Отказ в правах — единственная ошибка, из которой пользователь может
+/// выйти сам, поэтому у неё отдельное событие: панель вешает кнопку на
+/// него, а не на подстроку в тексте, который могут переформулировать.
+pub fn emit_accessibility_error(app: &AppHandle, message: impl Into<String>) {
+    let message = message.into();
+    let _ = app.emit_to("overlay", "error:accessibility", message);
+}
+
 /// Хоткей зажат: показываем панель и начинаем запись.
 pub fn hotkey_pressed(app: &AppHandle) {
     // Запоминаем, куда потом возвращать текст. Делаем это первой строкой,
@@ -235,19 +243,26 @@ pub fn paste_text(app: AppHandle, text: String) -> Result<(), String> {
                 eprintln!("не удалось вернуть фокус: {e}");
             }
             // Даём macOS домигать переключением фокуса.
+            // ponytail: фиксированная пауза вместо подтверждения, что приложение
+            // действительно стало активным. Опрос frontmost стоил бы ещё по вызову
+            // osascript на итерацию. Если на медленно поднимающихся приложениях текст
+            // начнёт уходить не туда — заменить на CGEvent и опрос активного окна.
             std::thread::sleep(std::time::Duration::from_millis(120));
         }
         if let Err(e) = macos::send_paste() {
             let msg = e.to_string();
             if macos::is_permission_error(&msg) {
                 show_overlay(&app);
-                emit_error(
+                emit_accessibility_error(
                     &app,
                     "Нет доступа к управлению приложениями. Разреши Slaive в «Универсальном доступе».",
                 );
             } else {
+                // Технические детали — только в лог: в них нет распознанной речи,
+                // но и пользователю они ничего не объясняют.
+                eprintln!("вставка не удалась: {msg}");
                 show_overlay(&app);
-                emit_error(&app, format!("Не удалось вставить: {msg}"));
+                emit_error(&app, "Не удалось вставить текст.");
             }
         }
     });

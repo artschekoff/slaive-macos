@@ -23,6 +23,7 @@ export function Overlay() {
   const [phase, setPhase] = useState<Phase>('idle')
   const [text, setText] = useState('')
   const [error, setError] = useState('')
+  const [needsAccessibility, setNeedsAccessibility] = useState(false)
 
   useEffect(() => {
     const subs = [
@@ -30,6 +31,7 @@ export function Overlay() {
         setPhase('recording')
         setText('')
         setError('')
+        setNeedsAccessibility(false)
       }),
       listen('rec:stop', () => setPhase('transcribing')),
       listen<string>('transcript', (e) => {
@@ -38,6 +40,11 @@ export function Overlay() {
       }),
       listen<string>('error', (e) => {
         setError(e.payload)
+        setPhase('error')
+      }),
+      listen<string>('error:accessibility', (e) => {
+        setError(e.payload)
+        setNeedsAccessibility(true)
         setPhase('error')
       }),
     ]
@@ -82,7 +89,7 @@ export function Overlay() {
           Копировать
         </button>
         <button onClick={() => hideOverlay()}>Закрыть</button>
-        {phase === 'error' && error.includes('Универсальном доступе') && (
+        {needsAccessibility && (
           <button onClick={() => openAccessibilitySettings()}>Открыть настройки</button>
         )}
       </div>
