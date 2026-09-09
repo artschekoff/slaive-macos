@@ -13,14 +13,27 @@ use tauri::{
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
             commands::save_settings,
+            commands::hide_overlay,
         ])
         .setup(|app| {
             let dir = commands::data_dir(app.handle())?;
             let loaded = settings::load(&dir);
             app.manage(state::AppState::new(loaded));
+
+            let hotkey = app
+                .state::<state::AppState>()
+                .settings
+                .lock()
+                .unwrap()
+                .hotkey
+                .clone();
+            if let Err(e) = commands::register_hotkey(app.handle(), &hotkey) {
+                eprintln!("хоткей не зарегистрирован: {e}");
+            }
 
             // Меню-бар приложение: без иконки в доке и без переключения по Cmd+Tab.
             #[cfg(target_os = "macos")]

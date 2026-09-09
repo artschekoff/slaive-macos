@@ -8,3 +8,4 @@ export type Settings = {
 
 export const getSettings = () => invoke<Settings>('get_settings')
 export const saveSettings = (settings: Settings) => invoke<void>('save_settings', { settings })
+export const hideOverlay = () => invoke<void>('hide_overlay')

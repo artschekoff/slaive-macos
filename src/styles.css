@@ -54,3 +54,65 @@ button.primary {
 }
 
 .ok { color: #30d158; font-size: 12px; }
+
+.overlay {
+  background: rgba(28, 28, 30, 0.92);
+  backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  height: 100vh;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.overlay .row { display: flex; align-items: center; gap: 10px; }
+
+.overlay .mic {
+  width: 32px;
+  height: 32px;
+  border-radius: 16px;
+  background: #2c2c2e;
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.overlay .mic.live {
+  background: #ff453a;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% { opacity: 0.55; }
+}
+
+.overlay .status { font-size: 13px; color: #a1a1a6; }
+
+.overlay .transcript {
+  flex: 1;
+  overflow-y: auto;
+  font-size: 14px;
+  line-height: 1.45;
+  user-select: text;
+}
+
+.overlay .dim { color: #636366; }
+
+.overlay .actions { display: flex; gap: 8px; }
+
+.overlay button {
+  background: #2c2c2e;
+  border: none;
+  border-radius: 6px;
+  color: #f2f2f7;
+  padding: 7px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.overlay button.primary { background: #0a84ff; color: #fff; }
+.overlay button:disabled { opacity: 0.4; cursor: default; }
