@@ -43,16 +43,11 @@ pub fn resample_to_16k(input: &[f32], from_rate: u32) -> Vec<f32> {
 
 /// Пишет с микрофона на выделенном потоке: `cpal::Stream` не `Send`,
 /// поэтому он не может жить в состоянии Tauri напрямую.
-// ponytail: start/stop и поля без вызывающего кода до Task 7 (склейка с
-// хоткеем) — поле AppState::recorder объявлено сейчас по контракту
-// интерфейса, усложнять не время.
-#[allow(dead_code)]
 pub struct Recorder {
     stop_tx: mpsc::Sender<()>,
     done_rx: mpsc::Receiver<Vec<f32>>,
 }
 
-#[allow(dead_code)]
 impl Recorder {
     pub fn start() -> anyhow::Result<Self> {
         let (stop_tx, stop_rx) = mpsc::channel::<()>();

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { hideOverlay } from './api'
+import { hideOverlay, startRecording, stopRecording } from './api'
 
 type Phase = 'idle' | 'recording' | 'transcribing' | 'ready' | 'error'
 
@@ -47,10 +47,17 @@ export function Overlay() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  const toggleMic = () => {
+    if (phase === 'recording') stopRecording()
+    else startRecording()
+  }
+
   return (
     <div className="overlay">
       <div className="row">
-        <div className={`mic ${phase === 'recording' ? 'live' : ''}`}>🎤</div>
+        <div className={`mic ${phase === 'recording' ? 'live' : ''}`} onClick={toggleMic}>
+          🎤
+        </div>
         <div className="status">{phase === 'error' ? error : LABEL[phase]}</div>
       </div>
       <div className="transcript">{text || <span className="dim">—</span>}</div>

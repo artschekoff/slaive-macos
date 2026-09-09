@@ -11,14 +11,8 @@ pub struct AppState {
     #[allow(dead_code)]
     pub prev_app_pid: Mutex<Option<i32>>,
     /// Активная запись с микрофона, если она сейчас идёт.
-    // ponytail: до Task 7 (склейка с хоткеем) сюда никто не пишет и не
-    // читает — поле объявлено сейчас по контракту интерфейса.
-    #[allow(dead_code)]
     pub recorder: Mutex<Option<Recorder>>,
     /// Загруженная модель whisper, если она уже загружена.
-    // ponytail: до Task 7 (склейка с хоткеем и записью) сюда никто не
-    // пишет и не читает — поле объявлено сейчас по контракту интерфейса.
-    #[allow(dead_code)]
     pub transcriber: Mutex<Option<Transcriber>>,
 }
 

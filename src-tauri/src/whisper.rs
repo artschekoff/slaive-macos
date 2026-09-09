@@ -8,9 +8,6 @@ use crate::audio::WHISPER_SAMPLE_RATE;
 /// вроде «Спасибо за просмотр», поэтому отбрасываем их сразу.
 pub const MIN_SAMPLES: usize = (WHISPER_SAMPLE_RATE / 2) as usize;
 
-// ponytail: вызывающих (Task 7 — склейка с хоткеем и записью) пока нет,
-// поэтому структура объявлена по контракту интерфейса, но не используется.
-#[allow(dead_code)]
 pub struct Transcriber {
     ctx: WhisperContext,
 }
@@ -34,9 +31,6 @@ fn thread_count() -> i32 {
 impl Transcriber {
     /// Загружает модель в память. Занимает 1–3 секунды, поэтому вызывается
     /// один раз и кэшируется в состоянии приложения.
-    // ponytail: вызывающих до Task 7 нет — поле AppState::transcriber
-    // объявлено по контракту интерфейса, метод пока мёртв.
-    #[allow(dead_code)]
     pub fn load(model_path: &Path) -> anyhow::Result<Self> {
         if !model_path.exists() {
             return Err(anyhow!(
@@ -53,8 +47,6 @@ impl Transcriber {
     }
 
     /// `pcm` должен быть f32, 16 кГц, моно. `language` — "auto", "ru" или "en".
-    // ponytail: вызывающих до Task 7 нет — метод пока мёртв.
-    #[allow(dead_code)]
     pub fn transcribe(&self, pcm: &[f32], language: &str) -> anyhow::Result<String> {
         if pcm.len() < MIN_SAMPLES {
             return Err(anyhow!("слишком короткая запись — говори дольше"));

@@ -1,6 +1,8 @@
+use crate::audio::Recorder;
 use crate::model::{self, ModelInfo};
 use crate::settings::{self, Settings};
 use crate::state::AppState;
+use crate::whisper::Transcriber;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
@@ -29,6 +31,9 @@ pub fn save_settings(
     settings::save(&dir, &settings).map_err(|e| e.to_string())?;
     *state.settings.lock().unwrap() = settings;
 
+    // Путь к модели или язык могли поменяться — перезагрузим модель при следующей записи.
+    *state.transcriber.lock().unwrap() = None;
+
     // Клонируем строку и сразу отпускаем мьютекс — register_hotkey не должен
     // вызываться с удерживаемой блокировкой настроек.
     let hotkey = state.settings.lock().unwrap().hotkey.clone();
@@ -52,9 +57,6 @@ pub fn hide_overlay(app: AppHandle) {
     }
 }
 
-// ponytail: не вызывается до Task 6/7 (ошибки распознавания речи), функция
-// объявлена сейчас по контракту интерфейса — усложнять не время.
-#[allow(dead_code)]
 pub fn emit_error(app: &AppHandle, message: impl Into<String>) {
     let message = message.into();
     let _ = app.emit_to("overlay", "error", message);
@@ -63,12 +65,87 @@ pub fn emit_error(app: &AppHandle, message: impl Into<String>) {
 /// Хоткей зажат: показываем панель и начинаем запись.
 pub fn hotkey_pressed(app: &AppHandle) {
     show_overlay(app);
-    let _ = app.emit_to("overlay", "rec:start", ());
+    begin_recording(app);
 }
 
 /// Хоткей отпущен: останавливаем запись и запускаем расшифровку.
 pub fn hotkey_released(app: &AppHandle) {
+    end_recording(app);
+}
+
+/// Общая логика старта записи — используется и хоткеем, и кликом по микрофону.
+pub fn begin_recording(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let mut slot = state.recorder.lock().unwrap();
+    if slot.is_some() {
+        return; // уже пишем — повторное нажатие игнорируем
+    }
+    match Recorder::start() {
+        Ok(rec) => {
+            *slot = Some(rec);
+            let _ = app.emit_to("overlay", "rec:start", ());
+        }
+        Err(e) => emit_error(app, format!("Микрофон недоступен: {e}")),
+    }
+}
+
+/// Общая логика остановки записи и запуска расшифровки в фоновом потоке.
+pub fn end_recording(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let Some(rec) = state.recorder.lock().unwrap().take() else {
+        return; // не писали — нечего останавливать
+    };
     let _ = app.emit_to("overlay", "rec:stop", ());
+
+    let app = app.clone();
+    // Транскрипция блокирует поток на секунды — уводим её с потока событий.
+    std::thread::spawn(move || {
+        let pcm = match rec.stop() {
+            Ok(pcm) => pcm,
+            Err(e) => return emit_error(&app, format!("Запись не удалась: {e}")),
+        };
+        // Длительность логируем, содержимое — никогда.
+        eprintln!("записано сэмплов: {}", pcm.len());
+
+        let state = app.state::<AppState>();
+        let (model_path, language) = {
+            let s = state.settings.lock().unwrap();
+            (s.model_path.clone(), s.language.clone())
+        };
+
+        let Some(model_path) = model_path else {
+            return emit_error(&app, "Модель не выбрана — открой настройки и скачай её");
+        };
+
+        // Загружаем модель один раз и держим в памяти.
+        let mut slot = state.transcriber.lock().unwrap();
+        if slot.is_none() {
+            match Transcriber::load(&model_path) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => return emit_error(&app, e.to_string()),
+            }
+        }
+        let result = slot.as_ref().unwrap().transcribe(&pcm, &language);
+        drop(slot);
+
+        match result {
+            Ok(text) if text.is_empty() => emit_error(&app, "Ничего не распознано"),
+            Ok(text) => {
+                let _ = app.emit_to("overlay", "transcript", text);
+            }
+            Err(e) => emit_error(&app, e.to_string()),
+        }
+    });
+}
+
+#[tauri::command]
+pub fn start_recording(app: AppHandle) {
+    begin_recording(&app);
+}
+
+#[tauri::command]
+pub fn stop_recording(app: AppHandle) {
+    end_recording(&app);
 }
 
 #[tauri::command]

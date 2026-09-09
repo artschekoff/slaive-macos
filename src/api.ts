@@ -15,3 +15,6 @@ export type Progress = { downloaded: number; total: number }
 
 export const listModels = () => invoke<ModelInfo[]>('list_models')
 export const downloadModel = (id: string) => invoke<string>('download_model', { id })
+
+export const startRecording = () => invoke<void>('start_recording')
+export const stopRecording = () => invoke<void>('stop_recording')
