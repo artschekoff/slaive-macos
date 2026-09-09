@@ -1,0 +1,10 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #f2f2f7;
+  background: transparent;
+  user-select: none;
+}
+
+.placeholder { padding: 16px; }

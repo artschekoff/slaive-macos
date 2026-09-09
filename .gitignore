@@ -104,3 +104,9 @@ node_modules/
 rulesync.jsonc
 rulesync.local.jsonc
 src-tauri/target/
+
+# Генерируется tauri-build при сборке (схемы для автодополнения capabilities)
+src-tauri/gen/schemas/
+
+# Временная заглушка иконки для `npx tauri icon` (не ассет проекта)
+/app-icon.png
