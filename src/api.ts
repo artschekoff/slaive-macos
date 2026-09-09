@@ -9,3 +9,9 @@ export type Settings = {
 export const getSettings = () => invoke<Settings>('get_settings')
 export const saveSettings = (settings: Settings) => invoke<void>('save_settings', { settings })
 export const hideOverlay = () => invoke<void>('hide_overlay')
+
+export type ModelInfo = { id: string; label: string; sizeMb: number }
+export type Progress = { downloaded: number; total: number }
+
+export const listModels = () => invoke<ModelInfo[]>('list_models')
+export const downloadModel = (id: string) => invoke<string>('download_model', { id })

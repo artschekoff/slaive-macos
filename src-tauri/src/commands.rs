@@ -1,3 +1,4 @@
+use crate::model::{self, ModelInfo};
 use crate::settings::{self, Settings};
 use crate::state::AppState;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -68,6 +69,28 @@ pub fn hotkey_pressed(app: &AppHandle) {
 /// Хоткей отпущен: останавливаем запись и запускаем расшифровку.
 pub fn hotkey_released(app: &AppHandle) {
     let _ = app.emit_to("overlay", "rec:stop", ());
+}
+
+#[tauri::command]
+pub fn list_models() -> Vec<ModelInfo> {
+    model::CATALOG.to_vec()
+}
+
+#[tauri::command]
+pub async fn download_model(app: AppHandle, id: String) -> Result<String, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    let path = model::download(&app, &dir, &id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Сразу прописываем путь в настройки — пользователю не надо копировать его руками.
+    let state = app.state::<AppState>();
+    let mut s = state.settings.lock().unwrap().clone();
+    s.model_path = Some(path.clone());
+    settings::save(&dir, &s).map_err(|e| e.to_string())?;
+    *state.settings.lock().unwrap() = s;
+
+    Ok(path.to_string_lossy().to_string())
 }
 
 /// Снимает все прежние хоткеи и вешает новый. Вызывается на старте и

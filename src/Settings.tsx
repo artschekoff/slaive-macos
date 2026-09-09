@@ -1,5 +1,14 @@
 import { useEffect, useState } from 'react'
-import { getSettings, saveSettings, type Settings as S } from './api'
+import { listen } from '@tauri-apps/api/event'
+import {
+  getSettings,
+  saveSettings,
+  listModels,
+  downloadModel,
+  type Settings as S,
+  type ModelInfo,
+  type Progress,
+} from './api'
 
 export function Settings() {
   const [s, setS] = useState<S | null>(null)
@@ -7,6 +16,20 @@ export function Settings() {
 
   useEffect(() => {
     getSettings().then(setS)
+  }, [])
+
+  const [models, setModels] = useState<ModelInfo[]>([])
+  const [choice, setChoice] = useState('small')
+  const [progress, setProgress] = useState<Progress | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [downloadError, setDownloadError] = useState('')
+
+  useEffect(() => {
+    listModels().then(setModels)
+    const un = listen<Progress>('model:progress', (e) => setProgress(e.payload))
+    return () => {
+      un.then((f) => f())
+    }
   }, [])
 
   if (!s) return <div className="settings">Загрузка…</div>
@@ -19,6 +42,20 @@ export function Settings() {
   const onSave = async () => {
     await saveSettings(s)
     setSaved(true)
+  }
+
+  const onDownload = async () => {
+    setBusy(true)
+    setDownloadError('')
+    setProgress(null)
+    try {
+      const path = await downloadModel(choice)
+      patch({ modelPath: path })
+    } catch (e) {
+      setDownloadError(String(e))
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -56,6 +93,23 @@ export function Settings() {
           onChange={(e) => patch({ modelPath: e.target.value || null })}
         />
       </label>
+
+      <div className="download">
+        <select value={choice} onChange={(e) => setChoice(e.target.value)} disabled={busy}>
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.label} · {m.sizeMb} МБ
+            </option>
+          ))}
+        </select>
+        <button onClick={onDownload} disabled={busy}>
+          {busy ? 'Скачиваю…' : 'Скачать'}
+        </button>
+      </div>
+      {progress && progress.total > 0 && (
+        <progress value={progress.downloaded} max={progress.total} />
+      )}
+      {downloadError && <span className="err">{downloadError}</span>}
 
       <button className="primary" onClick={onSave}>
         Сохранить

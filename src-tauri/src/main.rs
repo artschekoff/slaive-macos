@@ -2,6 +2,7 @@
 
 mod audio;
 mod commands;
+mod model;
 mod settings;
 mod state;
 
@@ -19,6 +20,8 @@ fn main() {
             commands::get_settings,
             commands::save_settings,
             commands::hide_overlay,
+            commands::list_models,
+            commands::download_model,
         ])
         .setup(|app| {
             let dir = commands::data_dir(app.handle())?;

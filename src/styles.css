@@ -55,6 +55,20 @@ button.primary {
 
 .ok { color: #30d158; font-size: 12px; }
 
+.download { display: flex; gap: 8px; align-items: center; }
+.download select { flex: 1; }
+.download button {
+  background: #2c2c2e;
+  border: none;
+  border-radius: 6px;
+  color: #f2f2f7;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.settings progress { width: 100%; height: 6px; }
+.err { color: #ff453a; font-size: 12px; }
+
 .overlay {
   background: rgba(28, 28, 30, 0.92);
   backdrop-filter: blur(24px);
