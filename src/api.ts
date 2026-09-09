@@ -18,3 +18,7 @@ export const downloadModel = (id: string) => invoke<string>('download_model', { 
 
 export const startRecording = () => invoke<void>('start_recording')
 export const stopRecording = () => invoke<void>('stop_recording')
+
+export const pasteText = (text: string) => invoke<void>('paste_text', { text })
+export const copyText = (text: string) => invoke<void>('copy_text', { text })
+export const openAccessibilitySettings = () => invoke<void>('open_accessibility_settings')

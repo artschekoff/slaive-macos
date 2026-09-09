@@ -1,6 +1,13 @@
 import { useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { hideOverlay, startRecording, stopRecording } from './api'
+import {
+  copyText,
+  hideOverlay,
+  openAccessibilitySettings,
+  pasteText,
+  startRecording,
+  stopRecording,
+} from './api'
 
 type Phase = 'idle' | 'recording' | 'transcribing' | 'ready' | 'error'
 
@@ -68,7 +75,16 @@ export function Overlay() {
       </div>
       <div className="transcript">{text || <span className="dim">—</span>}</div>
       <div className="actions">
+        <button className="primary" disabled={!text} onClick={() => pasteText(text)}>
+          Вставить
+        </button>
+        <button disabled={!text} onClick={() => copyText(text)}>
+          Копировать
+        </button>
         <button onClick={() => hideOverlay()}>Закрыть</button>
+        {phase === 'error' && error.includes('Универсальном доступе') && (
+          <button onClick={() => openAccessibilitySettings()}>Открыть настройки</button>
+        )}
       </div>
     </div>
   )

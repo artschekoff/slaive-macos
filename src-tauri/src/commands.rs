@@ -1,9 +1,11 @@
 use crate::audio::Recorder;
+use crate::macos;
 use crate::model::{self, ModelInfo};
 use crate::settings::{self, Settings};
 use crate::state::AppState;
 use crate::whisper::Transcriber;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 /// Папка данных приложения; создаётся при первом обращении.
@@ -64,6 +66,9 @@ pub fn emit_error(app: &AppHandle, message: impl Into<String>) {
 
 /// Хоткей зажат: показываем панель и начинаем запись.
 pub fn hotkey_pressed(app: &AppHandle) {
+    // Запоминаем, куда потом возвращать текст. Делаем это первой строкой,
+    // пока панель ещё не показана и фокус точно у чужого приложения.
+    *app.state::<AppState>().prev_app_pid.lock().unwrap() = crate::macos::frontmost_pid();
     show_overlay(app);
     begin_recording(app);
 }
@@ -200,4 +205,57 @@ pub fn register_hotkey(app: &AppHandle, hotkey: &str) -> anyhow::Result<()> {
         ShortcutState::Released => hotkey_released(app),
     })?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn paste_text(app: AppHandle, text: String) -> Result<(), String> {
+    app.clipboard()
+        .write_text(text)
+        .map_err(|e| e.to_string())?;
+
+    let pid = *app.state::<AppState>().prev_app_pid.lock().unwrap();
+
+    // Панель прячем до возврата фокуса: пока она на экране, активным
+    // приложением может быть она сама, а не то, куда мы хотим вставить текст.
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.hide();
+    }
+
+    // osascript блокирует поток на ~100 мс — уводим в фон, чтобы UI не подвисал.
+    std::thread::spawn(move || {
+        if let Some(pid) = pid {
+            if let Err(e) = macos::activate_pid(pid) {
+                // Приложение могли закрыть между запоминанием PID и вставкой —
+                // это ожидаемо, вставляем в то, что активно сейчас.
+                eprintln!("не удалось вернуть фокус: {e}");
+            }
+            // Даём macOS домигать переключением фокуса.
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        if let Err(e) = macos::send_paste() {
+            let msg = e.to_string();
+            if macos::is_permission_error(&msg) {
+                show_overlay(&app);
+                emit_error(
+                    &app,
+                    "Нет доступа к управлению приложениями. Разреши Slaive в «Универсальном доступе».",
+                );
+            } else {
+                show_overlay(&app);
+                emit_error(&app, format!("Не удалось вставить: {msg}"));
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn open_accessibility_settings() {
+    macos::open_accessibility_settings();
 }

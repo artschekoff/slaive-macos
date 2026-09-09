@@ -6,9 +6,7 @@ use std::sync::Mutex;
 pub struct AppState {
     pub settings: Mutex<Settings>,
     /// PID приложения, которое было активным в момент нажатия хоткея.
-    // ponytail: не читается до Task 3/4 (перехват хоткея и запись), поле
-    // объявлено сейчас по контракту интерфейса — усложнять не время.
-    #[allow(dead_code)]
+    /// Используется при вставке текста, чтобы вернуть фокус в исходное окно.
     pub prev_app_pid: Mutex<Option<i32>>,
     /// Активная запись с микрофона, если она сейчас идёт.
     pub recorder: Mutex<Option<Recorder>>,

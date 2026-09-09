@@ -2,6 +2,7 @@
 
 mod audio;
 mod commands;
+mod macos;
 mod model;
 mod settings;
 mod state;
@@ -25,6 +26,9 @@ fn main() {
             commands::download_model,
             commands::start_recording,
             commands::stop_recording,
+            commands::paste_text,
+            commands::copy_text,
+            commands::open_accessibility_settings,
         ])
         .setup(|app| {
             let dir = commands::data_dir(app.handle())?;
