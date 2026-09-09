@@ -46,6 +46,14 @@ fn main() {
                 eprintln!("хоткей не зарегистрирован: {e}");
             }
 
+            // Без модели приложение бесполезно — сразу показываем настройки.
+            if app.state::<state::AppState>().settings.lock().unwrap().model_path.is_none() {
+                if let Some(w) = app.get_webview_window("settings") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+
             // Меню-бар приложение: без иконки в доке и без переключения по Cmd+Tab.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);

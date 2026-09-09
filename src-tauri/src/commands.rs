@@ -108,7 +108,14 @@ pub fn begin_recording(app: &AppHandle) {
             *slot = Some(rec);
             let _ = app.emit_to("overlay", "rec:start", ());
         }
-        Err(e) => emit_error(app, format!("Микрофон недоступен: {e}")),
+        Err(e) => {
+            // cpal отдаёт причину по-английски — в лог, пользователю фиксированный текст.
+            eprintln!("микрофон недоступен: {e}");
+            emit_error(
+                app,
+                "Микрофон недоступен. Разреши Slaive доступ к микрофону в Системных настройках → Конфиденциальность и безопасность → Микрофон и попробуй снова.",
+            );
+        }
     }
 }
 
@@ -125,7 +132,11 @@ pub fn end_recording(app: &AppHandle) {
     std::thread::spawn(move || {
         let pcm = match rec.stop() {
             Ok(pcm) => pcm,
-            Err(e) => return emit_error(&app, format!("Запись не удалась: {e}")),
+            Err(e) => {
+                // cpal отдаёт причину по-английски — в лог, пользователю фиксированный текст.
+                eprintln!("запись не удалась: {e}");
+                return emit_error(&app, "Запись не удалась. Попробуй ещё раз.");
+            }
         };
         // Длительность логируем, содержимое — никогда.
         eprintln!("записано сэмплов: {}", pcm.len());
@@ -145,7 +156,14 @@ pub fn end_recording(app: &AppHandle) {
         if slot.is_none() {
             match Transcriber::load(&model_path) {
                 Ok(t) => *slot = Some(t),
-                Err(e) => return emit_error(&app, e.to_string()),
+                Err(e) => {
+                    // Верхняя строка ошибки (e.to_string()) уже по-русски — её
+                    // добавляет .context(...) в whisper.rs. В лог уводим полную
+                    // цепочку: причина внутри неё (whisper.cpp, файловая система)
+                    // часто по-английски и пользователю не нужна.
+                    eprintln!("модель whisper не загрузилась: {e:?}");
+                    return emit_error(&app, e.to_string());
+                }
             }
         }
         let result = slot.as_ref().unwrap().transcribe(&pcm, &language);
@@ -156,7 +174,13 @@ pub fn end_recording(app: &AppHandle) {
             Ok(text) => {
                 let _ = app.emit_to("overlay", "transcript", text);
             }
-            Err(e) => emit_error(&app, e.to_string()),
+            Err(e) => {
+                // Тот же приём: верхнее сообщение из .context(...) уже по-русски
+                // и полезно пользователю («слишком короткая запись…»), а полную
+                // цепочку — в лог, без содержимого записи.
+                eprintln!("расшифровка не удалась: {e:?}");
+                emit_error(&app, e.to_string())
+            }
         }
     });
 }

@@ -15,7 +15,7 @@ const LABEL: Record<Phase, string> = {
   idle: 'Зажми хоткей и говори',
   recording: 'Записываю…',
   transcribing: 'Расшифровываю…',
-  ready: 'Готово',
+  ready: 'Готово — «Вставить» вернёт текст в исходное окно',
   error: 'Ошибка',
 }
 
@@ -41,6 +41,9 @@ export function Overlay() {
       listen<string>('error', (e) => {
         setError(e.payload)
         setPhase('error')
+        // Обычная ошибка может прийти после отказа в правах — флаг из того
+        // случая не должен пережить её и оставить лишнюю кнопку в панели.
+        setNeedsAccessibility(false)
       }),
       listen<string>('error:accessibility', (e) => {
         setError(e.payload)
