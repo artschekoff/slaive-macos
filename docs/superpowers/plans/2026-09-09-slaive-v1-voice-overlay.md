@@ -272,10 +272,6 @@ name = "slaive"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-name = "slaive_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -475,8 +471,14 @@ git commit -m "feat: каркас Tauri-приложения с иконкой �
 mod tests {
     use super::*;
 
-    fn tmp() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("slaive-test-{}", std::process::id()));
+    /// Своя папка на каждый тест. Тесты в одном бинаре идут параллельно и
+    /// имеют общий `process::id()`, поэтому в путь входит ещё и id потока —
+    /// иначе `remove_dir_all` одного теста сносит фикстуру другого.
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "slaive-test-{}-{name}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -484,7 +486,7 @@ mod tests {
 
     #[test]
     fn defaults_when_file_missing() {
-        let dir = tmp();
+        let dir = tmp("missing");
         let s = load(&dir);
         assert_eq!(s.hotkey, "Ctrl+Space");
         assert_eq!(s.model_path, None);
@@ -493,7 +495,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let dir = tmp();
+        let dir = tmp("roundtrip");
         let s = Settings {
             hotkey: "Alt+Space".into(),
             model_path: Some(std::path::PathBuf::from("/tmp/ggml-small.bin")),
@@ -505,14 +507,14 @@ mod tests {
 
     #[test]
     fn defaults_when_file_corrupt() {
-        let dir = tmp();
+        let dir = tmp("corrupt");
         std::fs::write(dir.join("settings.json"), "{ это не json").unwrap();
         assert_eq!(load(&dir), Settings::default());
     }
 
     #[test]
     fn missing_fields_fall_back_to_defaults() {
-        let dir = tmp();
+        let dir = tmp("partial");
         std::fs::write(dir.join("settings.json"), r#"{"language":"en"}"#).unwrap();
         let s = load(&dir);
         assert_eq!(s.language, "en");
@@ -1592,11 +1594,20 @@ pub async fn download_model(
         .map_err(|e| e.to_string())?;
 
     // Сразу прописываем путь в настройки — пользователю не надо копировать его руками.
+    // Чтение, запись на диск и обновление состояния — одна критическая секция.
+    // Иначе правка, которую пользователь сохранил через save_settings пока шла
+    // загрузка (а это минуты), молча затрётся устаревшим клоном.
+    // Запись на диск идёт до записи в память: если save упадёт, состояние цело.
+    // Внутрь секции нельзя вносить .await — std::sync::Mutex через точку
+    // ожидания превратит эту гонку в дедлок.
     let state = app.state::<AppState>();
-    let mut s = state.settings.lock().unwrap().clone();
-    s.model_path = Some(path.clone());
-    settings::save(&dir, &s).map_err(|e| e.to_string())?;
-    *state.settings.lock().unwrap() = s;
+    {
+        let mut guard = state.settings.lock().unwrap();
+        let mut candidate = guard.clone();
+        candidate.model_path = Some(path.clone());
+        settings::save(&dir, &candidate).map_err(|e| e.to_string())?;
+        *guard = candidate;
+    }
 
     Ok(path.to_string_lossy().to_string())
 }
@@ -1950,7 +1961,7 @@ git commit -m "feat: транскрипция через whisper.cpp с уско
 **Interfaces:**
 - Consumes: `audio::Recorder` (Task 4), `whisper::Transcriber` (Task 6), `hotkey_pressed`/`hotkey_released` (Task 3)
 - Produces:
-  - команды `start_recording(app) -> Result<(), String>` и `stop_recording(app) -> Result<(), String>` — для клика по микрофону
+  - команды `start_recording(app)` и `stop_recording(app)` — для клика по микрофону. Значения не возвращают: единственный путь ошибки — событие `error`, которое панель уже слушает. Второй канал ошибок через `Result` был бы дублем, который фронтенд всё равно игнорирует (`invoke<void>`).
   - событие `transcript` с payload `String` в окно `overlay`
   - `commands::begin_recording(app: &AppHandle)` и `commands::end_recording(app: &AppHandle)` — общая логика для хоткея и кнопки
 
@@ -1967,6 +1978,17 @@ pub fn begin_recording(app: &AppHandle) {
     let mut slot = state.recorder.lock().unwrap();
     if slot.is_some() {
         return; // уже пишем — повторное нажатие игнорируем
+    }
+    // Пока идёт расшифровка, транскрибер заблокирован фоновым потоком.
+    // Занятая блокировка — и есть признак того, что предыдущая запись ещё
+    // обрабатывается, поэтому новую не начинаем: её результат всё равно
+    // перетёрся бы, а писала бы она в никуда. Это закрывает и путь хоткея,
+    // до которого guard во фронтенде не дотягивается.
+    // ponytail: признак «идёт расшифровка» читаем из уже существующей
+    // блокировки вместо отдельного флага — если появится второй потребитель
+    // транскрибера, завести явный флаг состояния.
+    if state.transcriber.try_lock().is_err() {
+        return;
     }
     match Recorder::start() {
         Ok(rec) => {
@@ -2075,9 +2097,30 @@ export const stopRecording = () => invoke<void>('stop_recording')
 
 ```tsx
 const toggleMic = () => {
+  // Во время расшифровки микрофон неактивен: предыдущая запись ещё
+  // обрабатывается, и вторая перетёрла бы её результат.
+  if (phase === 'transcribing') return
   if (phase === 'recording') stopRecording()
   else startRecording()
 }
+```
+
+И сам микрофон показывает это состояние, иначе проигнорированный клик читается
+как зависшее приложение:
+
+```tsx
+<div
+  className={`mic ${phase === 'recording' ? 'live' : ''} ${phase === 'transcribing' ? 'busy' : ''}`}
+  onClick={toggleMic}
+>
+  🎤
+</div>
+```
+
+Дописать в `src/styles.css`:
+
+```css
+.overlay .mic.busy { opacity: 0.4; cursor: default; }
 ```
 
 ```tsx
