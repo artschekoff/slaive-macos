@@ -36,9 +36,9 @@ Slaive → System Events) — grant that too.
 ## Hotkey conflict
 
 The default hotkey is set by pressing a key combination in Slaive's settings.
-On macOS, `Ctrl+Space` is taken by Input Source switching by default. Either
-turn that off in "Keyboard → Keyboard Shortcuts → Input Sources", or set a
-different combination in Slaive's settings.
+The default, `Cmd+T`, is "New Tab" in most apps — a global hotkey intercepts
+it system-wide. Set a different combination in Slaive's settings if that
+conflicts with how you work.
 
 ## Building
 
