@@ -24,12 +24,14 @@ fn main() {
             commands::hide_overlay,
             commands::list_models,
             commands::download_model,
+            commands::download_vad_model,
             commands::start_recording,
             commands::stop_recording,
             commands::paste_text,
             commands::copy_text,
             commands::open_privacy_pane,
             commands::validate_hotkey,
+            commands::get_last_recording,
         ])
         .setup(|app| {
             let dir = commands::data_dir(app.handle())?;

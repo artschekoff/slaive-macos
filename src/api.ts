@@ -4,6 +4,15 @@ export type Settings = {
   hotkey: string
   modelPath: string | null
   language: 'auto' | 'ru' | 'en'
+  /** Optional VAD model path. `null` means VAD is off — transcription still works. */
+  vadModelPath: string | null
+  /** Window-level shortcut (see shortcut.ts format) that pastes the transcript
+   *  back into the source app. Not a global hotkey — only active while the
+   *  overlay panel is open and focused. Default "Enter". */
+  pasteShortcut: string
+  /** Window-level shortcut that copies the transcript to the clipboard.
+   *  Same scoping as pasteShortcut. Default "Super+KeyC" (Cmd+C). */
+  copyShortcut: string
 }
 
 export type SettingsResponse = Settings & {
@@ -21,8 +30,14 @@ export type Progress = { downloaded: number; total: number }
 export const listModels = () => invoke<ModelInfo[]>('list_models')
 export const downloadModel = (id: string) => invoke<string>('download_model', { id })
 
+/** Downloads the (single, fixed) VAD model. No id — there is no size choice for it. */
+export const downloadVadModel = () => invoke<string>('download_vad_model')
+
 export const startRecording = () => invoke<void>('start_recording')
 export const stopRecording = () => invoke<void>('stop_recording')
+
+/** PCM последней завершённой записи (16 кГц моно) для воспроизведения через WebAudio. */
+export const getLastRecording = () => invoke<number[] | null>('get_last_recording')
 
 export const pasteText = (text: string) => invoke<void>('paste_text', { text })
 export const copyText = (text: string) => invoke<void>('copy_text', { text })

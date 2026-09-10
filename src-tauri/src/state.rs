@@ -1,7 +1,8 @@
 use crate::audio::Recorder;
 use crate::settings::Settings;
 use crate::whisper::Transcriber;
-use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use tauri_plugin_global_shortcut::Shortcut;
 
 pub struct AppState {
@@ -20,6 +21,11 @@ pub struct AppState {
     /// приложения или сохранение настроек). Если нет — окно настроек должно
     /// предупредить пользователя, что комбинация не работает.
     pub hotkey_ok: Mutex<bool>,
+    /// PCM последней завершённой записи (16 кГц моно) — для воспроизведения.
+    pub last_recording: Mutex<Option<Vec<f32>>>,
+    /// Флаг остановки потока-эмиттера уровней текущей записи. `Some` только
+    /// пока эмиттер активен; `end_recording` вынимает его и опускает флаг.
+    pub level_emitter_stop: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl AppState {
@@ -31,6 +37,8 @@ impl AppState {
             transcriber: Mutex::new(None),
             current_hotkey: Mutex::new(None),
             hotkey_ok: Mutex::new(true),
+            last_recording: Mutex::new(None),
+            level_emitter_stop: Mutex::new(None),
         }
     }
 }

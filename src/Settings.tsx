@@ -1,51 +1,22 @@
 import { useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
+import { ShortcutCapture } from './ShortcutCapture'
 import {
   getSettings,
   saveSettings,
   listModels,
   downloadModel,
+  downloadVadModel,
   validateHotkey,
   type SettingsResponse as S,
   type ModelInfo,
   type Progress,
 } from './api'
 
-// «Запись хоткея нажатием»: клавиши-модификаторы сами по себе не образуют
-// комбинацию — ждём, пока к ним добавится обычная клавиша.
-const MODIFIER_CODES = new Set([
-  'ControlLeft', 'ControlRight', 'AltLeft', 'AltRight',
-  'ShiftLeft', 'ShiftRight', 'MetaLeft', 'MetaRight',
-])
-
-function accelerator(e: KeyboardEvent): string | null {
-  // Одни модификаторы — не комбинация: ждём обычную клавишу.
-  if (MODIFIER_CODES.has(e.code)) return null
-  const parts: string[] = []
-  if (e.ctrlKey) parts.push('Ctrl')
-  if (e.altKey) parts.push('Alt')
-  if (e.shiftKey) parts.push('Shift')
-  if (e.metaKey) parts.push('Super')
-  parts.push(e.code)
-  return parts.join('+')
-}
-
-// Машинный формат (`Ctrl+Space`) хранится как есть; здесь — только то, как
-// он показывается пользователю (`Ctrl + Space`, `Super` -> `Cmd` на macOS).
-function displayHotkey(accel: string): string {
-  return accel
-    .split('+')
-    .map((part) => (part === 'Super' ? 'Cmd' : part))
-    .join(' + ')
-}
-
 export function Settings() {
   const [s, setS] = useState<S | null>(null)
   const [saved, setSaved] = useState(false)
   const [saveError, setSaveError] = useState('')
-
-  const [capturingHotkey, setCapturingHotkey] = useState(false)
-  const [hotkeyError, setHotkeyError] = useState('')
 
   useEffect(() => {
     getSettings().then(setS)
@@ -65,38 +36,16 @@ export function Settings() {
     }
   }, [])
 
-  // Слушаем нажатие только пока идёт запись хоткея; Escape отменяет её и
-  // оставляет прежнюю комбинацию.
+  const [vadProgress, setVadProgress] = useState<Progress | null>(null)
+  const [vadBusy, setVadBusy] = useState(false)
+  const [vadError, setVadError] = useState('')
+
   useEffect(() => {
-    if (!capturingHotkey) return
-    const onKeyDown = (e: KeyboardEvent) => {
-      e.preventDefault()
-      if (e.key === 'Escape') {
-        setCapturingHotkey(false)
-        return
-      }
-      const accel = accelerator(e)
-      if (!accel) return // одни модификаторы — продолжаем ждать
-      setCapturingHotkey(false)
-
-      if (!(e.ctrlKey || e.altKey || e.shiftKey || e.metaKey)) {
-        setHotkeyError(
-          'Global hotkey needs at least one modifier (Ctrl, Alt, Shift, or Cmd) — otherwise it ' +
-            'would capture this key in every app. Try a different combination.'
-        )
-        return
-      }
-
-      setHotkeyError('')
-      // C1: расхождение с реальным форматом global-hotkey должно всплыть
-      // понятным сообщением сразу, а не мёртвым хоткеем после Save.
-      validateHotkey(accel)
-        .then(() => patch({ hotkey: accel }))
-        .catch((e) => setHotkeyError(String(e)))
+    const un = listen<Progress>('vad:progress', (e) => setVadProgress(e.payload))
+    return () => {
+      un.then((f) => f())
     }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [capturingHotkey])
+  }, [])
 
   if (!s) return <div className="settings">Loading…</div>
 
@@ -135,34 +84,61 @@ export function Settings() {
     }
   }
 
+  const onDownloadVad = async () => {
+    setVadBusy(true)
+    setVadError('')
+    setVadProgress(null)
+    try {
+      const path = await downloadVadModel()
+      patch({ vadModelPath: path })
+    } catch (e) {
+      setVadError(String(e))
+    } finally {
+      setVadBusy(false)
+    }
+  }
+
   return (
     <div className="settings">
       <h1>Settings</h1>
 
       <label>
         Hotkey
-        <button
-          type="button"
-          className={`hotkey-capture ${capturingHotkey ? 'recording' : ''}`}
-          onClick={() => {
-            setHotkeyError('')
-            setCapturingHotkey(true)
-          }}
-        >
-          {capturingHotkey ? 'Press any key combination…' : displayHotkey(s.hotkey)}
-        </button>
+        <ShortcutCapture
+          value={s.hotkey}
+          onChange={(accel) => patch({ hotkey: accel })}
+          requireModifier
+          validate={validateHotkey}
+        />
       </label>
-      {hotkeyError && <span className="err">{hotkeyError}</span>}
       {s.hotkeyOk === false && (
         <span className="err">
           The saved hotkey isn't active right now. Set a new one and save to fix it.
         </span>
       )}
       <p className="hint">
-        Hold this combination to record. The default <code>Ctrl + Space</code> may be taken by
-        Input Source switching on macOS. Turn that off in
-        System Settings → Keyboard → Keyboard Shortcuts → Input Sources, or set a different
-        combination above.
+        Hold this combination to record. The default <code>Cmd + T</code> is "New Tab" in most
+        apps — a global hotkey intercepts it system-wide. Set a different combination above if
+        that conflicts with how you work.
+      </p>
+
+      <label>
+        Paste shortcut
+        <ShortcutCapture value={s.pasteShortcut} onChange={(accel) => patch({ pasteShortcut: accel })} />
+      </label>
+      <p className="hint">
+        Pressing this while the panel is open and has recognized text pastes it back into the app
+        you came from. Shown on the Paste button as a badge.
+      </p>
+
+      <label>
+        Copy shortcut
+        <ShortcutCapture value={s.copyShortcut} onChange={(accel) => patch({ copyShortcut: accel })} />
+      </label>
+      <p className="hint">
+        Pressing this while the panel is open and has recognized text copies it to the clipboard.
+        These two only work while the panel is focused — they don't register system-wide like the
+        hotkey above.
       </p>
 
       <label>
@@ -209,6 +185,34 @@ export function Settings() {
           </span>
         ))}
       {downloadError && <span className="err">{downloadError}</span>}
+
+      <label>
+        Voice activity detection model (optional)
+        <input
+          value={s.vadModelPath ?? ''}
+          placeholder="Not downloaded"
+          onChange={(e) => patch({ vadModelPath: e.target.value || null })}
+        />
+      </label>
+      <p className="hint">
+        Skips silent stretches so pauses while you think aren't transcribed or turned into
+        hallucinated captions, and transcription runs faster. Optional — everything works without
+        it.
+      </p>
+      <div className="download">
+        <button onClick={onDownloadVad} disabled={vadBusy}>
+          {vadBusy ? 'Downloading…' : s.vadModelPath ? 'Re-download' : 'Download'}
+        </button>
+      </div>
+      {vadProgress &&
+        (vadProgress.total > 0 ? (
+          <progress value={vadProgress.downloaded} max={vadProgress.total} />
+        ) : (
+          <span className="hint">
+            {(vadProgress.downloaded / 1_000_000).toFixed(1)} MB downloaded…
+          </span>
+        ))}
+      {vadError && <span className="err">{vadError}</span>}
 
       <button className="primary" onClick={onSave}>
         Save

@@ -7,6 +7,17 @@ use tokio::io::AsyncWriteExt;
 
 const BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
+/// VAD (Voice Activity Detection) — отдельный от каталога транскрипции
+/// артефакт: ровно один файл, а не выбор между размерами, поэтому у него
+/// нет записи в `CATALOG` и нет выпадающего списка. Тот же
+/// `ggerganov/whisper.cpp` отдаёт для этого файла 404 — модель лежит в
+/// отдельном репозитории `ggml-org/whisper-vad`.
+const VAD_MODEL_URL_BASE: &str = "https://huggingface.co/ggml-org/whisper-vad/resolve/main";
+/// Единственный допустимый id VAD-модели — тот же приём защиты от path
+/// traversal, что и у `url_for`: URL строится только для этого точного id.
+pub const VAD_MODEL_ID: &str = "silero-v5.1.2";
+pub const VAD_MODEL_FILE_NAME: &str = "ggml-silero-v5.1.2.bin";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
@@ -35,6 +46,12 @@ pub fn url_for(id: &str) -> Option<String> {
         .map(|m| format!("{BASE_URL}/{}", file_name(m.id)))
 }
 
+/// Тот же приём для VAD: URL строится только при точном совпадении с
+/// единственным известным id, а не подстановкой произвольного значения.
+pub fn vad_url_for(id: &str) -> Option<String> {
+    (id == VAD_MODEL_ID).then(|| format!("{VAD_MODEL_URL_BASE}/{VAD_MODEL_FILE_NAME}"))
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Progress {
@@ -47,11 +64,33 @@ struct Progress {
 /// прерванная загрузка не оставит битый файл, который выглядит как рабочий.
 pub async fn download(app: &AppHandle, dir: &Path, id: &str) -> anyhow::Result<PathBuf> {
     let url = url_for(id).ok_or_else(|| anyhow!("Unknown model: {id}."))?;
+    download_to(app, dir, &url, &file_name(id), "model:progress").await
+}
+
+/// То же самое для VAD-модели: выбора размера тут нет, поэтому без id —
+/// единственный известный URL берётся напрямую из `vad_url_for`. Прогресс —
+/// отдельным событием `vad:progress`, чтобы не путаться с загрузкой модели
+/// транскрипции, если пользователь умудрится запустить оба скачивания разом.
+pub async fn download_vad(app: &AppHandle, dir: &Path) -> anyhow::Result<PathBuf> {
+    let url = vad_url_for(VAD_MODEL_ID).expect("VAD_MODEL_ID должен совпадать сам с собой");
+    download_to(app, dir, &url, VAD_MODEL_FILE_NAME, "vad:progress").await
+}
+
+/// Общее ядро загрузки, разделяемое моделями транскрипции и VAD: пишет во
+/// временный `.part` и переименовывает только после успеха — прерванная
+/// загрузка не оставит битый файл, который выглядит как рабочий.
+async fn download_to(
+    app: &AppHandle,
+    dir: &Path,
+    url: &str,
+    file_name: &str,
+    progress_event: &str,
+) -> anyhow::Result<PathBuf> {
     let models_dir = dir.join("models");
     tokio::fs::create_dir_all(&models_dir).await?;
 
-    let final_path = models_dir.join(file_name(id));
-    let part_path = models_dir.join(format!("{}.part", file_name(id)));
+    let final_path = models_dir.join(file_name);
+    let part_path = models_dir.join(format!("{file_name}.part"));
 
     // I9: без явных таймаутов зависшее соединение оставляло пользователя
     // смотреть на «Downloading…» без полосы, без отмены и без ошибки —
@@ -64,7 +103,7 @@ pub async fn download(app: &AppHandle, dir: &Path, id: &str) -> anyhow::Result<P
         .context("Couldn't create the download client.")?;
 
     let response = client
-        .get(&url)
+        .get(url)
         .send()
         .await
         .context("Couldn't reach huggingface.co. Check your internet connection and try again.")?
@@ -84,7 +123,7 @@ pub async fn download(app: &AppHandle, dir: &Path, id: &str) -> anyhow::Result<P
         // Событие не чаще, чем раз на мегабайт — иначе UI захлебнётся.
         if downloaded - last_emitted > 1_000_000 {
             last_emitted = downloaded;
-            let _ = app.emit_to("settings", "model:progress", Progress { downloaded, total });
+            let _ = app.emit_to("settings", progress_event, Progress { downloaded, total });
         }
     }
     file.flush().await?;
@@ -93,7 +132,7 @@ pub async fn download(app: &AppHandle, dir: &Path, id: &str) -> anyhow::Result<P
     tokio::fs::rename(&part_path, &final_path).await?;
     let _ = app.emit_to(
         "settings",
-        "model:progress",
+        progress_event,
         Progress { downloaded, total: downloaded },
     );
     Ok(final_path)
@@ -127,5 +166,20 @@ mod tests {
         // Защита от подстановки произвольного пути в URL.
         assert!(url_for("../../etc/passwd").is_none());
         assert!(url_for("не-существует").is_none());
+    }
+
+    #[test]
+    fn vad_url_matches_known_id() {
+        assert_eq!(
+            vad_url_for(VAD_MODEL_ID).unwrap(),
+            "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin"
+        );
+    }
+
+    #[test]
+    fn vad_url_rejects_unknown_ids() {
+        // Тот же приём защиты от path traversal, что и у моделей транскрипции.
+        assert!(vad_url_for("../../etc/passwd").is_none());
+        assert!(vad_url_for("не-существует").is_none());
     }
 }

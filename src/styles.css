@@ -86,11 +86,27 @@ button.primary {
 .settings progress { width: 100%; height: 6px; }
 .err { color: #ff453a; font-size: 12px; }
 
+/* Шасси панели — анодированный металл, а не плоская заливка. Вертикальный
+   градиент читает свет сверху: холоднее и светлее у верхнего края, теплее и
+   темнее у нижнего, как у настоящей алюминиевой пластины. Светлая линия
+   inset сверху и тёмная снизу — единственный приём, который делает
+   прямоугольник «приподнятым объектом», а не залитым прямоугольником.
+   Прозрачность и блюр не трогаем: панель по-прежнему плывёт над содержимым
+   экрана, и это часть эффекта, а не то, что нужно спрятать под металл. */
 .overlay {
-  background: rgba(28, 28, 30, 0.92);
+  background: linear-gradient(
+    180deg,
+    rgba(70, 73, 80, 0.90) 0%,
+    rgba(42, 42, 45, 0.91) 45%,
+    rgba(20, 19, 19, 0.94) 100%
+  );
   backdrop-filter: blur(24px);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 14px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.55),
+    0 14px 34px rgba(0, 0, 0, 0.38);
   height: 100vh;
   padding: 16px;
   display: flex;
@@ -98,13 +114,38 @@ button.primary {
   gap: 12px;
 }
 
+.overlay .source-app {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #9a9aa0;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
+}
+
+.overlay .source-app-icon {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
 .overlay .row { display: flex; align-items: center; gap: 10px; }
 
+/* Кнопка микрофона — тот же корпусной металл, что и шасси, в миниатюре:
+   лёгкий блик сверху-слева и фаска по краю, чтобы читаться как утопленная
+   кнопка устройства, а не плоский кружок. */
 .overlay .mic {
   width: 32px;
   height: 32px;
   border-radius: 16px;
-  background: #2c2c2e;
+  background:
+    radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 60%),
+    linear-gradient(180deg, #3c3c40 0%, #222224 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 1px rgba(0, 0, 0, 0.5),
+    0 1px 2px rgba(0, 0, 0, 0.4);
   display: grid;
   place-items: center;
   font-size: 16px;
@@ -112,8 +153,18 @@ button.primary {
   flex-shrink: 0;
 }
 
+/* Состояние записи — сигнальная лампа, а не просто цветной кружок: тёплый
+   блик у источника света и глоу вокруг корпуса. Пульсация (@keyframes pulse)
+   не трогается — она уже была, здесь только материал под ней. */
 .overlay .mic.live {
-  background: #ff453a;
+  background:
+    radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.4), rgba(255, 69, 58, 0) 55%),
+    linear-gradient(180deg, #ff6b60 0%, #d0261c 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -1px 1px rgba(0, 0, 0, 0.4),
+    0 0 8px rgba(255, 69, 58, 0.55),
+    0 0 2px rgba(255, 69, 58, 0.8);
   animation: pulse 1.2s ease-in-out infinite;
 }
 
@@ -123,29 +174,218 @@ button.primary {
   50% { opacity: 0.55; }
 }
 
-.overlay .status { font-size: 13px; color: #a1a1a6; }
-
-.overlay .transcript {
-  flex: 1;
-  overflow-y: auto;
-  font-size: 14px;
-  line-height: 1.45;
-  user-select: text;
+.overlay .status {
+  font-size: 13px;
+  color: #a1a1a6;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.3);
 }
 
-.overlay .dim { color: #636366; }
+/* Дорожка уровня утоплена в шасси, как окошко индикатора за стеклом.
+   Всё в этом блоке и в двух псевдоэлементах ниже — рамка, фаска выреза,
+   стеклянный блик — декорация контейнера, не данных: ни один слой здесь не
+   получает пропсов и не знает о levels/height. Центральная линия (::before)
+   и сами бары (.level) остаются единственным источником сигнала, как и было:
+   столбики центрируются по вертикали и растут поровну вверх/вниз от оси без
+   нижнего порога — ровно нулевой пик не рисует ничего, чтобы тишина не
+   выглядела слабым сигналом. Рамку и фаску даём через box-shadow, а не
+   padding/border — так el.clientWidth, от которого JS считает вместимость
+   дорожки барами, не меняется декорацией. */
+.overlay .levels {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 64px;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-radius: 8px;
+  /* Экран — почти чёрный с холодным отливом: так читается непитаемая
+     подсветка приборной панели, когда на неё ничего не выведено. */
+  background: linear-gradient(180deg, #0a0d12 0%, #06070a 100%);
+  box-shadow:
+    /* фаска выреза: тёмный верхний внутренний край... */
+    inset 0 3px 6px rgba(0, 0, 0, 0.8),
+    /* ...и светлый нижний внутренний — обратная фаска приподнятого элемента */
+    inset 0 -1px 0 rgba(255, 255, 255, 0.07),
+    /* тонкая металлическая рамка по контуру выреза */
+    inset 0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.overlay .levels::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Стеклянный блик поверх дисплея — статическое свойство стекла, а не
+   данных: один и тот же диагональный градиент рисуется всегда, при пустой
+   дорожке, при тишине и при громкой речи. Только верхняя часть и очень
+   низкая непрозрачность — стекло должно угадываться, а не заявлять о себе;
+   если бы это усиливало пустую дорожку до вида «там что-то едва светится»,
+   приём был бы неверным, поэтому значения здесь такие низкие. */
+.overlay .levels::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    115deg,
+    rgba(255, 255, 255, 0.05) 0%,
+    rgba(255, 255, 255, 0.05) 18%,
+    rgba(255, 255, 255, 0) 40%
+  );
+  pointer-events: none;
+  z-index: 2;
+}
+
+.overlay .level {
+  flex: 0 0 2px;
+  background: linear-gradient(180deg, #3fa9ff 0%, #0a84ff 100%);
+  border-radius: 1px;
+}
+
+/* Часть 2/3: textarea, не div — редактируемая, но должна читаться как
+   обычный текст панели, а не как поле формы: без рамки, без своего фона,
+   та же типографика, что была у read-only варианта.
+   min-width: 0 переопределяет дефолтный min-width: auto у флекс-элемента —
+   без этого длинный неразрывный токен (URL, путь) задаёт элементу
+   min-content шире контейнера, и вся textarea вылезает за правый край
+   панели ещё до того, как успевает сработать перенос строк внутри неё.
+   overflow-wrap: anywhere переносит сам такой токен посимвольно, раз уж
+   пробелов внутри него нет.
+
+   min-height — та же проблема, но по вертикали. У флекс-элемента дефолт
+   min-height: auto, и для textarea это на практике означает «не меньше, чем
+   нужно контенту» (WKWebView, на котором рендерится оверлей на macOS, не
+   обнуляет автоматический минимум для textarea даже при overflow-y: auto,
+   в отличие от того, что можно было бы ожидать от спеки для обычных блочных
+   элементов) — то есть длинная расшифровка раздвигала бы textarea вместо
+   того, чтобы проскроллиться внутри него, и панель вылезала бы за границы
+   окна. Явное числовое значение здесь — не «ещё одна цифра», а сам механизм
+   починки: любое ЧИСЛО (в отличие от auto) отключает эту зависимость от
+   контента, поэтому отдельный min-height: 0 не нужен — 4 строки одновременно
+   и снимают auto, и остаются осмысленным полом:
+   80px = 4 × ~20px (line-height 1.45 при font-size 14px ≈ 20.3px) — при
+   flex: 1 в окне 440×340 фактически достаётся ещё больше (~109px, то есть
+   ~5 строк), это лишь гарантированный минимум, который не отожмётся в
+   ничто, если над транскриптом когда-нибудь появится что-то ещё. */
+/* Транскрипт остаётся обычным редактируемым полем: пользователь правит
+   текст здесь, и декорация не должна спорить с читаемостью. Только лёгкий
+   инсет — «вдавленность», не рамка и не стекло; ни border, ни background
+   мы ему не даём. min-height/flex не трогаем — они несущие. */
+.overlay .transcript {
+  flex: 1;
+  min-width: 0;
+  min-height: 80px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.45;
+  color: inherit;
+  user-select: text;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.18);
+  outline: none;
+  resize: none;
+  appearance: none;
+}
+
+.overlay .transcript::placeholder { color: #636366; }
 
 .overlay .actions { display: flex; gap: 8px; }
 
+/* Кнопки — старый iOS/GarageBand глянец: градиент светлее сверху, темнее
+   снизу (свет сверху), светлая волосяная линия по верхнему краю как блик,
+   и внешняя тень снизу — «приподнято над шасси». Внутреннее свечение у
+   верхнего края (второй inset ниже) читается как глянцевая литая
+   поверхность. */
 .overlay button {
-  background: #2c2c2e;
-  border: none;
-  border-radius: 6px;
+  position: relative;
+  background: linear-gradient(180deg, #5a5a5e 0%, #3a3a3e 45%, #29292c 100%);
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  border-radius: 7px;
   color: #f2f2f7;
   padding: 7px 14px;
   font-size: 13px;
   cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    inset 0 6px 8px -6px rgba(255, 255, 255, 0.18),
+    0 1px 1px rgba(0, 0, 0, 0.3),
+    0 2px 3px rgba(0, 0, 0, 0.35);
+  text-shadow: 0 -1px 0 rgba(0, 0, 0, 0.4);
 }
 
-.overlay button.primary { background: #0a84ff; color: #fff; }
-.overlay button:disabled { opacity: 0.4; cursor: default; }
+/* Primary — то же самое стекло, но синее: контраст с графитовыми кнопками
+   и достаточная яркость на просвечивающем шасси. */
+.overlay button.primary {
+  background: linear-gradient(180deg, #6dbcff 0%, #2f8ee8 45%, #0a63c2 100%);
+  color: #fff;
+  border-color: rgba(0, 30, 60, 0.55);
+}
+
+/* Нажатое состояние — физика переворачивается по-настоящему: градиент
+   зеркалится (тёмное теперь сверху), тень уходит внутрь, кнопка садится на
+   пиксель вниз. Это и есть тот старый-iOS-приём, который делал кнопку
+   кнопкой. :not(:disabled) — задизабленная кнопка не должна «нажиматься». */
+.overlay button:not(:disabled):active {
+  background: linear-gradient(180deg, #232326 0%, #3a3a3e 55%, #4a4a4e 100%);
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.55),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.06);
+  text-shadow: none;
+  transform: translateY(1px);
+}
+
+.overlay button.primary:not(:disabled):active {
+  background: linear-gradient(180deg, #0a63c2 0%, #2f8ee8 55%, #6dbcff 100%);
+}
+
+/* Задизабленная кнопка теряет блик и обесцвечивается, а не просто тускнеет —
+   иначе глянцевая поверхность продолжает «гореть» и читается как баг, а не
+   как недоступность. Специфичность правил .primary и :disabled одинакова
+   (два класса/псевдокласса на .overlay button), поэтому порядок в файле
+   решает: это правило идёт последним и переопределяет background primary. */
+.overlay button:disabled {
+  background: linear-gradient(180deg, #3a3a3c 0%, #2c2c2e 100%);
+  color: rgba(242, 242, 247, 0.35);
+  border-color: rgba(0, 0, 0, 0.4);
+  box-shadow: none;
+  text-shadow: none;
+  filter: saturate(0.35);
+  cursor: default;
+}
+
+/* Бейдж хоткея на кнопке (⏎, ⌘C…) — гравировка, а не наклейка: тёмная
+   вставка с светлым нижним краем, как будто буквы вырезаны в поверхности
+   кнопки. Второстепенная подсказка — меньше и тише названия действия, но
+   должна остаться читаемой на своём размере. */
+.overlay .shortcut-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.75);
+  background: rgba(0, 0, 0, 0.28);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.6),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.12);
+  text-shadow: none;
+}
+
+.overlay button:disabled .shortcut-badge {
+  color: rgba(255, 255, 255, 0.3);
+  background: rgba(0, 0, 0, 0.2);
+  box-shadow: none;
+}

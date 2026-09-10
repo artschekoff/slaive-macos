@@ -41,11 +41,20 @@ pub fn resample_to_16k(input: &[f32], from_rate: u32) -> Vec<f32> {
     out
 }
 
+/// Пиковая амплитуда чанка. Вынесено отдельно, чтобы поддавалось тесту.
+pub fn peak_amplitude(chunk: &[f32]) -> f32 {
+    chunk.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+}
+
 /// Пишет с микрофона на выделенном потоке: `cpal::Stream` не `Send`,
 /// поэтому он не может жить в состоянии Tauri напрямую.
 pub struct Recorder {
     stop_tx: mpsc::Sender<()>,
     done_rx: mpsc::Receiver<anyhow::Result<Vec<f32>>>,
+    /// Пики по чанкам, копятся в колбэке и вычерпываются `drain_peaks`.
+    /// Живёт в `Arc`, общем с потоком записи: доступ на чтение/очистку не
+    /// требует владения `Recorder` и работает, пока запись идёт.
+    peaks: Arc<Mutex<Vec<f32>>>,
 }
 
 impl Recorder {
@@ -53,6 +62,8 @@ impl Recorder {
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let (done_tx, done_rx) = mpsc::channel::<anyhow::Result<Vec<f32>>>();
         let (init_tx, init_rx) = mpsc::channel::<anyhow::Result<()>>();
+        let peaks: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let peaks_thread = peaks.clone();
 
         std::thread::spawn(move || {
             let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
@@ -67,14 +78,21 @@ impl Recorder {
                 let sample_rate = config.sample_rate().0;
                 let channels = config.channels();
                 let sink = buffer.clone();
+                let peaks_sink = peaks_thread.clone();
                 // ponytail: поддерживаем только f32-вход, добавить ветки
                 // i16/u16, если появится устройство, которое на этом падает.
                 let stream = device
                     .build_input_stream(
                         &config.into(),
                         move |data: &[f32], _| {
+                            // Только арифметика и запись в буфер — колбэк в реальном
+                            // времени, аллокации и IPC здесь недопустимы.
+                            let peak = peak_amplitude(data);
                             if let Ok(mut b) = sink.lock() {
                                 b.extend_from_slice(data);
+                            }
+                            if let Ok(mut p) = peaks_sink.lock() {
+                                p.push(peak);
                             }
                         },
                         |err| eprintln!("ошибка потока микрофона: {err}"),
@@ -116,7 +134,17 @@ impl Recorder {
         });
 
         init_rx.recv().context("recording thread didn't start")??;
-        Ok(Self { stop_tx, done_rx })
+        Ok(Self { stop_tx, done_rx, peaks })
+    }
+
+    /// Забирает пики, накопленные с прошлого вызова, и очищает буфер.
+    pub fn drain_peaks(&self) -> Vec<f32> {
+        match self.peaks.lock() {
+            Ok(mut p) => std::mem::take(&mut *p),
+            // Отравленный мьютекс пиков — не повод терять запись целиком,
+            // как в случае с основным буфером; просто нечего вернуть на этот тик.
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Останавливает запись и отдаёт 16 кГц моно f32.
@@ -199,5 +227,20 @@ mod tests {
         assert!(out.windows(2).all(|w| w[1] > w[0]));
         // Первое окно усредняет сэмплы 0,1,2 → 1.0
         assert!((out[0] - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn peak_of_empty_is_zero() {
+        assert_eq!(peak_amplitude(&[]), 0.0);
+    }
+
+    #[test]
+    fn peak_ignores_sign() {
+        assert_eq!(peak_amplitude(&[-0.8, 0.3]), 0.8);
+    }
+
+    #[test]
+    fn peak_of_silence_is_zero() {
+        assert_eq!(peak_amplitude(&[0.0, 0.0, 0.0]), 0.0);
     }
 }

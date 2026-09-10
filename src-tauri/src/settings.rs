@@ -13,14 +13,37 @@ pub struct Settings {
     pub model_path: Option<PathBuf>,
     /// "auto" | "ru" | "en"
     pub language: String,
+    /// Абсолютный путь к файлу модели VAD (Silero), если пользователь её
+    /// скачал. `None` — VAD выключен, расшифровка идёт по всей записи целиком,
+    /// как и раньше; это не ошибка и не деградация, а сознательный дефолт.
+    pub vad_model_path: Option<PathBuf>,
+    /// Хоткей вставки текста в панели — в том же формате, что `hotkey`, но
+    /// это НЕ глобальная комбинация: она перехватывается обычным keydown
+    /// внутри окна overlay (см. Overlay.tsx), а не через
+    /// tauri-plugin-global-shortcut, поэтому здесь не проходит через
+    /// `validate_hotkey`/`register_hotkey` и хранится как обычная строка.
+    pub paste_shortcut: String,
+    /// Хоткей копирования текста в панели — та же оговорка, что у
+    /// `paste_shortcut`: окно-локальный, не глобальный.
+    pub copy_shortcut: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            hotkey: "Ctrl+Space".to_string(),
+            // Cmd+T — сознательный выбор пользователя, несмотря на коллизию
+            // с «New Tab» в большинстве приложений; предупреждение об этом
+            // теперь в подсказке настроек, а не здесь.
+            hotkey: "Super+KeyT".to_string(),
             model_path: None,
             language: "auto".to_string(),
+            vad_model_path: None,
+            // Enter — уже существовавшее поведение до того, как оно стало
+            // настраиваемым; голая клавиша допустима именно потому, что это
+            // окно-локальный хоткей, а не глобальный (см. комментарий у поля).
+            paste_shortcut: "Enter".to_string(),
+            // Cmd+C — стандартное системное сочетание для копирования.
+            copy_shortcut: "Super+KeyC".to_string(),
         }
     }
 }
@@ -65,9 +88,12 @@ mod tests {
     fn defaults_when_file_missing() {
         let dir = tmp();
         let s = load(&dir);
-        assert_eq!(s.hotkey, "Ctrl+Space");
+        assert_eq!(s.hotkey, "Super+KeyT");
         assert_eq!(s.model_path, None);
         assert_eq!(s.language, "auto");
+        assert_eq!(s.vad_model_path, None);
+        assert_eq!(s.paste_shortcut, "Enter");
+        assert_eq!(s.copy_shortcut, "Super+KeyC");
     }
 
     #[test]
@@ -77,9 +103,43 @@ mod tests {
             hotkey: "Alt+Space".into(),
             model_path: Some(std::path::PathBuf::from("/tmp/ggml-small.bin")),
             language: "ru".into(),
+            vad_model_path: Some(std::path::PathBuf::from("/tmp/ggml-silero-v5.1.2.bin")),
+            paste_shortcut: "Shift+Enter".into(),
+            copy_shortcut: "Ctrl+Alt+KeyC".into(),
         };
         save(&dir, &s).unwrap();
         assert_eq!(load(&dir), s);
+    }
+
+    /// Настройки, сохранённые до появления VAD, не должны переставать
+    /// загружаться — отсутствующее поле должно тихо стать `None`.
+    #[test]
+    fn settings_without_vad_field_still_load() {
+        let dir = tmp();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"hotkey":"Alt+Space","modelPath":"/tmp/ggml-small.bin","language":"ru"}"#,
+        )
+        .unwrap();
+        let s = load(&dir);
+        assert_eq!(s.vad_model_path, None);
+        assert_eq!(s.language, "ru");
+    }
+
+    /// Настройки, сохранённые до появления настраиваемых Paste/Copy, не
+    /// должны переставать загружаться — отсутствующие поля тихо становятся
+    /// дефолтами, тем же путём, что уже отработан для VAD выше.
+    #[test]
+    fn settings_without_shortcut_fields_fall_back_to_defaults() {
+        let dir = tmp();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"hotkey":"Alt+Space","modelPath":"/tmp/ggml-small.bin","language":"ru"}"#,
+        )
+        .unwrap();
+        let s = load(&dir);
+        assert_eq!(s.paste_shortcut, "Enter");
+        assert_eq!(s.copy_shortcut, "Super+KeyC");
     }
 
     #[test]
@@ -95,6 +155,6 @@ mod tests {
         std::fs::write(dir.join("settings.json"), r#"{"language":"en"}"#).unwrap();
         let s = load(&dir);
         assert_eq!(s.language, "en");
-        assert_eq!(s.hotkey, "Ctrl+Space");
+        assert_eq!(s.hotkey, "Super+KeyT");
     }
 }
