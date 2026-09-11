@@ -9,10 +9,15 @@ import { displayShortcut, hasModifier, parseKeyEvent } from './shortcut'
 type ShortcutCaptureProps = {
   value: string
   onChange: (accel: string) => void
-  // Только у глобального хоткея записи: голая клавиша без модификатора
-  // перехватила бы её во всех приложениях системы. У Paste/Copy это не
-  // нужно и не должно требоваться — их дефолты как раз "Enter" и "Cmd+C".
+  // Голая клавиша без модификатора допустима не везде. У глобального хоткея
+  // записи она перехватила бы клавишу во всех приложениях системы; у хоткеев
+  // действий главного окна — отобрала бы её у Vim в поле текста. У Paste/Copy
+  // ни того, ни другого нет, и их дефолты как раз "Enter" и "Cmd+C".
   requireModifier?: boolean
+  // Почему именно здесь нужен модификатор — причина у глобального хоткея и у
+  // оконных действий разная, и текст ошибки обязан её называть, иначе
+  // пользователь читает неправду. Имеет смысл только вместе с requireModifier.
+  modifierError?: string
   // Только у глобального хоткея: разбор через реальный парсер
   // tauri-plugin-global-shortcut ДО сохранения (см. commands::validate_hotkey).
   // Paste/Copy — обычные window-level keydown в Overlay, они этот парсер не
@@ -20,7 +25,16 @@ type ShortcutCaptureProps = {
   validate?: (accel: string) => Promise<void>
 }
 
-export function ShortcutCapture({ value, onChange, requireModifier, validate }: ShortcutCaptureProps) {
+const DEFAULT_MODIFIER_ERROR =
+  'This shortcut needs at least one modifier (Ctrl, Alt, Shift, or Cmd). Try a different combination.'
+
+export function ShortcutCapture({
+  value,
+  onChange,
+  requireModifier,
+  modifierError,
+  validate,
+}: ShortcutCaptureProps) {
   const [capturing, setCapturing] = useState(false)
   const [error, setError] = useState('')
 
@@ -39,10 +53,7 @@ export function ShortcutCapture({ value, onChange, requireModifier, validate }: 
       setCapturing(false)
 
       if (requireModifier && !hasModifier(accel)) {
-        setError(
-          'Global hotkey needs at least one modifier (Ctrl, Alt, Shift, or Cmd) — otherwise it ' +
-            'would capture this key in every app. Try a different combination.'
-        )
+        setError(modifierError ?? DEFAULT_MODIFIER_ERROR)
         return
       }
 
@@ -57,7 +68,7 @@ export function ShortcutCapture({ value, onChange, requireModifier, validate }: 
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [capturing, requireModifier, validate, onChange])
+  }, [capturing, requireModifier, modifierError, validate, onChange])
 
   return (
     <>

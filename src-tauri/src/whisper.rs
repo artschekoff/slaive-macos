@@ -23,6 +23,47 @@ pub fn join_segments(segments: &[String]) -> String {
         .join(" ")
 }
 
+/// Зажимает порог VAD в допустимый диапазон. Пришедшее значение могли
+/// поправить руками в settings.json: 0.0 сделал бы VAD бесполезным («всё
+/// речь»), 1.0 — вырезал бы запись целиком, а NaN уронил бы `clamp`.
+pub fn clamp_vad_threshold(threshold: f32) -> f32 {
+    if threshold.is_nan() {
+        return crate::settings::DEFAULT_VAD_THRESHOLD;
+    }
+    threshold.clamp(
+        crate::settings::MIN_VAD_THRESHOLD,
+        crate::settings::MAX_VAD_THRESHOLD,
+    )
+}
+
+/// Собирает `initial_prompt` из словаря терминов пользователя.
+///
+/// Зачем это вообще: человек диктует по-русски и вставляет английские
+/// термины. Без подсказки whisper пишет их кириллицей («реакт», «докер»), и
+/// исправлять приходится руками каждый раз. Увидев те же слова в затравке,
+/// модель повторяет их написание.
+///
+/// Пользователь пишет их списком — по строке или через запятую; whisper ждёт
+/// связный текст, поэтому строки склеиваются в одну через запятую. Пустые
+/// куски выбрасываются, пустой словарь целиком даёт `None` — параметр не
+/// передаётся вовсе, а не пустой строкой (пустая затравка не то же самое,
+/// что её отсутствие, и незачем выяснять, как whisper.cpp понимает первое).
+///
+/// NUL вырезается: `FullParams::set_initial_prompt` строит `CString` и на
+/// нуле внутри строки паникует (whisper-rs 0.16). В settings.json такой байт
+/// не попадёт через интерфейс, но файл правят руками.
+pub fn initial_prompt(dictionary: &str) -> Option<String> {
+    let terms: Vec<String> = dictionary
+        .split(['\n', ','])
+        .map(|term| term.replace('\0', "").trim().to_string())
+        .filter(|term| !term.is_empty())
+        .collect();
+    if terms.is_empty() {
+        return None;
+    }
+    Some(terms.join(", "))
+}
+
 fn thread_count() -> i32 {
     std::thread::available_parallelism()
         .map(|n| n.get() as i32)
@@ -44,15 +85,23 @@ impl Transcriber {
         Ok(Self { ctx })
     }
 
-    /// `pcm` должен быть f32, 16 кГц, моно. `language` — "auto", "ru" или "en".
+    /// `pcm` должен быть f32, 16 кГц, моно, УЖЕ усиленный (см.
+    /// `audio::apply_gain` — усиление применяется до вызова, одинаково для
+    /// VAD и для расшифровки). `language` — "auto", "ru" или "en".
     /// `vad_model_path` — путь к модели VAD (Silero), если пользователь её
     /// скачал; `None` или несуществующий файл просто отключают VAD, это не
     /// ошибка — расшифровка идёт как раньше, по всему аудио целиком.
+    /// `vad_threshold` — порог вероятности речи, имеет смысл только когда
+    /// VAD включён; вне диапазона зажимается (см. `settings`).
+    /// `initial_prompt` — уже собранная затравка из словаря терминов (см.
+    /// `initial_prompt`); `None` означает, что параметр не передаётся вовсе.
     pub fn transcribe(
         &self,
         pcm: &[f32],
         language: &str,
         vad_model_path: Option<&Path>,
+        vad_threshold: f32,
+        initial_prompt: Option<&str>,
     ) -> anyhow::Result<String> {
         if pcm.len() < MIN_SAMPLES {
             return Err(anyhow!("Recording too short — hold the hotkey and speak longer."));
@@ -86,6 +135,13 @@ impl Transcriber {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
 
+        // Словарь терминов. Задаём параметр ТОЛЬКО когда затравка есть:
+        // set_initial_prompt копирует строку в свой CString (whisper-rs
+        // 0.16), поэтому одолжённая &str переживать вызов не обязана.
+        if let Some(prompt) = initial_prompt {
+            params.set_initial_prompt(prompt);
+        }
+
         // VAD — усиление, а не обязательное условие: пользователь, не
         // скачавший модель, должен получить расшифровку точно как раньше.
         // Путь объявлен до `params.set_vad_model_path`, чтобы пережить сам
@@ -116,11 +172,17 @@ impl Transcriber {
                 // лишней почти тишины на сегмент из многосекундной записи)
                 // ничтожна на фоне цели "не резать начало слова".
                 vad_params.set_speech_pad(200);
-                // threshold, min_speech_duration, max_speech_duration,
-                // samples_overlap — дефолты крейта: пользовательский кейс не
-                // даёт основания их менять (короткого шума на грани
-                // распознавания не больше обычного, максимум длины сегмента
-                // и так ограничен длиной записи хоткея).
+                // Порог обнаружения речи — единственный параметр VAD, который
+                // вынесен пользователю (см. `settings::vad_threshold`): на
+                // тихом микрофоне дефолтные 0.5 могут не увидеть речи вовсе и
+                // вырезать всю запись, а симптом («ничего не распознано»)
+                // неотличим от обычной неудачи. Значение зажимается здесь, а
+                // не только в интерфейсе: settings.json правится руками.
+                vad_params.set_threshold(clamp_vad_threshold(vad_threshold));
+                // min_speech_duration, max_speech_duration, samples_overlap —
+                // дефолты крейта: пользовательский кейс не даёт основания их
+                // менять (максимум длины сегмента и так ограничен длиной
+                // записи хоткея).
                 params.set_vad_params(vad_params);
             }
         }
@@ -188,6 +250,65 @@ mod tests {
         assert_eq!(MIN_SAMPLES, 8_000);
     }
 
+    /// Пустой словарь — параметр не передаётся вовсе, а не пустой строкой.
+    #[test]
+    fn empty_dictionary_produces_no_prompt() {
+        assert_eq!(initial_prompt(""), None);
+        assert_eq!(initial_prompt("   "), None);
+        assert_eq!(initial_prompt("\n\n  \n"), None);
+        // Одни разделители без слов — тоже пусто.
+        assert_eq!(initial_prompt(",,, \n , "), None);
+    }
+
+    /// Пользователь пишет термины списком; whisper ждёт связный текст.
+    #[test]
+    fn dictionary_lines_become_one_comma_separated_prompt() {
+        assert_eq!(
+            initial_prompt("React\nTypeScript\nKubernetes").as_deref(),
+            Some("React, TypeScript, Kubernetes")
+        );
+    }
+
+    /// Списком через запятую в одну строку — тот же результат: разделитель
+    /// выбирает пользователь, а не формат поля.
+    #[test]
+    fn commas_and_newlines_are_the_same_separator() {
+        assert_eq!(
+            initial_prompt("React, TypeScript\n  Kubernetes ,\n\n Docker "),
+            initial_prompt("React\nTypeScript\nKubernetes\nDocker")
+        );
+    }
+
+    /// Кириллица и латиница в одном словаре — ровно тот случай, ради
+    /// которого поле существует: русская речь с английскими терминами.
+    #[test]
+    fn dictionary_keeps_mixed_scripts_as_typed() {
+        assert_eq!(
+            initial_prompt("Слейв\nwhisper.cpp\nTauri").as_deref(),
+            Some("Слейв, whisper.cpp, Tauri")
+        );
+    }
+
+    /// NUL уронил бы `set_initial_prompt` паникой внутри CString — в
+    /// settings.json такой байт можно вписать руками.
+    #[test]
+    fn nul_bytes_are_stripped_before_they_reach_cstring() {
+        let prompt = initial_prompt("Rea\0ct\nTauri").unwrap();
+        assert!(!prompt.contains('\0'));
+        assert_eq!(prompt, "React, Tauri");
+    }
+
+    #[test]
+    fn vad_threshold_is_clamped_to_the_useful_range() {
+        assert_eq!(clamp_vad_threshold(0.5), 0.5);
+        assert_eq!(clamp_vad_threshold(0.0), crate::settings::MIN_VAD_THRESHOLD);
+        assert_eq!(clamp_vad_threshold(1.0), crate::settings::MAX_VAD_THRESHOLD);
+        assert_eq!(
+            clamp_vad_threshold(f32::NAN),
+            crate::settings::DEFAULT_VAD_THRESHOLD
+        );
+    }
+
     /// Проверка на живой модели. Запуск:
     /// SLAIVE_MODEL=~/Library/Application\ Support/net.slaive.app/models/ggml-base.bin \
     ///   cargo test loads_real_model -- --ignored --nocapture
@@ -198,7 +319,7 @@ mod tests {
         let t = Transcriber::load(std::path::Path::new(&path)).unwrap();
         // Тишина: модель должна отработать без паники и вернуть строку.
         let silence = vec![0.0_f32; 16_000 * 2];
-        let text = t.transcribe(&silence, "ru", None).unwrap();
+        let text = t.transcribe(&silence, "ru", None, 0.5, None).unwrap();
         println!("на тишине получили: {text:?}");
     }
 
@@ -225,14 +346,14 @@ mod tests {
             })
             .collect();
 
-        let text = t.transcribe(&tone, "auto", None).unwrap();
+        let text = t.transcribe(&tone, "auto", None, 0.5, None).unwrap();
         println!("на тоне 440 Гц с language=auto получили: {text:?}");
         // Основная регрессия, которую мы ловим: раньше это возвращало Ok("")
         // из-за detect_language, не дойдя до транскрипции вообще. transcribe
         // должен как минимум успешно завершиться, не упав в пустую строку
         // из-за возврата на этапе определения языка.
         assert!(
-            t.transcribe(&tone, "auto", None).is_ok(),
+            t.transcribe(&tone, "auto", None, 0.5, None).is_ok(),
             "transcribe с auto должен завершаться Ok"
         );
     }
@@ -276,7 +397,7 @@ mod tests {
         pcm.extend_from_slice(&silence);
 
         let text = t
-            .transcribe(&pcm, "auto", Some(vad_path.as_path()))
+            .transcribe(&pcm, "auto", Some(vad_path.as_path()), 0.5, None)
             .unwrap();
         println!("VAD включён ({}): получили {text:?}", vad_path.display());
     }

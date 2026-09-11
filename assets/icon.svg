@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="chassis" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b2f36"/>
+      <stop offset="0.55" stop-color="#191c21"/>
+      <stop offset="1" stop-color="#0c0e11"/>
+    </linearGradient>
+    <linearGradient id="dough" x1="0.2" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#FFE86B"/>
+      <stop offset="0.45" stop-color="#FFC81E"/>
+      <stop offset="1" stop-color="#DE9605"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.5"/>
+      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="mouthClip">
+      <path d="M 686.9 262.2 A 305 305 0 1 0 686.9 761.8 L 566.5 589.8
+               A 95 95 0 1 1 566.5 434.2 Z"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1024" height="1024" rx="228" fill="url(#chassis)"/>
+  <rect x="6" y="6" width="1012" height="1012" rx="222" fill="none"
+        stroke="#ffffff" stroke-opacity="0.10" stroke-width="3"/>
+
+  <g transform="rotate(-10 512 512)">
+    <!-- Язык лежит в проёме, опираясь на нижнюю челюсть -->
+    <path d="M 598 626 q 108 -8 134 62 q -88 44 -134 -14 Z"
+          fill="#E2452F" stroke="#8A2E1C" stroke-width="12" stroke-linejoin="round"/>
+
+    <!-- Тесто: внешняя дуга длинным путём, внутренняя обратно -->
+    <path d="M 686.9 262.2 A 305 305 0 1 0 686.9 761.8 L 566.5 589.8
+             A 95 95 0 1 1 566.5 434.2 Z"
+          fill="url(#dough)" stroke="#8A5A00" stroke-width="16" stroke-linejoin="round"/>
+    <path d="M 686.9 262.2 A 305 305 0 1 0 686.9 761.8 L 566.5 589.8
+             A 95 95 0 1 1 566.5 434.2 Z"
+          fill="url(#gloss)"/>
+
+    <!-- Посыпка -->
+    <g stroke-linecap="round" stroke-width="17" opacity="0.9">
+      <path d="M 372 300 l 40 -22" stroke="#FF6B9D"/>
+      <path d="M 268 470 l 44 8"   stroke="#5AC8FA"/>
+      <path d="M 322 646 l 30 34"  stroke="#FFFFFF"/>
+      <path d="M 470 754 l 44 -6"  stroke="#5AC8FA"/>
+      <path d="M 268 366 l 26 36"  stroke="#FFFFFF"/>
+      <path d="M 452 262 l 8 44"   stroke="#5AC8FA"/>
+      <path d="M 404 700 l 42 16"  stroke="#FF6B9D"/>
+    </g>
+
+    <!-- Зажмуренные глаза -->
+    <path d="M 470 286 q 40 -54 80 0" fill="none" stroke="#3A2600"
+          stroke-width="30" stroke-linecap="round"/>
+    <path d="M 344 340 q 40 -54 80 0" fill="none" stroke="#3A2600"
+          stroke-width="30" stroke-linecap="round"/>
+  </g>
+
+  <!-- Крик -->
+  <g stroke="#FFC81E" stroke-linecap="round" fill="none">
+    <path d="M 812 428 q 52 84 0 168" stroke-width="30"/>
+    <path d="M 894 386 q 74 126 0 252" stroke-width="26" opacity="0.55"/>
+  </g>
+</svg>

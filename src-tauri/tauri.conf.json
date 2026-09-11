@@ -18,7 +18,7 @@
         "url": "index.html",
         "title": "Slaive",
         "width": 440,
-        "height": 340,
+        "height": 252,
         "resizable": false,
         "decorations": false,
         "transparent": true,
@@ -33,18 +33,43 @@
         "label": "settings",
         "url": "index.html",
         "title": "Slaive Settings",
-        "width": 560,
-        "height": 480,
-        "resizable": false,
+        "width": 760,
+        "height": 600,
+        "minWidth": 680,
+        "minHeight": 520,
+        "resizable": true,
+        "visible": false
+      },
+      {
+        "label": "main",
+        "url": "index.html",
+        "title": "Slaive",
+        "width": 720,
+        "height": 560,
+        "minWidth": 480,
+        "minHeight": 400,
+        "resizable": true,
+        "decorations": true,
+        "center": true,
         "visible": false
       }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": null
+    }
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
-    "icon": ["icons/icon.icns"],
-    "macOS": { "minimumSystemVersion": "12.0" }
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/icon.icns"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    },
+    "category": "Utility"
   }
 }

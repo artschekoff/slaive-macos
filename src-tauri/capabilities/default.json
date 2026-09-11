@@ -1,12 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Права для окон overlay и settings",
-  "windows": ["overlay", "settings"],
+  "description": "Права для окон overlay, settings и main",
+  "windows": ["overlay", "settings", "main"],
   "permissions": [
     "core:default",
     "core:window:allow-hide",
     "core:window:allow-show",
+    "core:window:allow-set-size",
     "core:event:default"
   ]
 }
