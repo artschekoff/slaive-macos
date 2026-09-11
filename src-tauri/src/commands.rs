@@ -243,7 +243,7 @@ pub async fn test_ai_connection(state: State<'_, AppState>) -> Result<String, St
 }
 
 /// Единственная сетевая точка входа для действий меню главного окна
-/// (Translate/Ask AI/Fix/Shorten) — уходит в сеть ТОЛЬКО когда её вызвали, то
+/// (Translate/Ask AI/Fix/Shorten/Summarize) — уходит в сеть ТОЛЬКО когда её вызвали, то
 /// есть только по явному нажатию действия во фронтенде (см. бриф: ни при
 /// открытии окна, ни при получении текста запросов быть не должно). Дерево
 /// действий, подписи и системные промпты целиком живут во фронтенде (см.
@@ -450,16 +450,55 @@ pub struct SourceAppPayload {
     pub icon: Option<String>,
 }
 
+impl SourceAppPayload {
+    /// Единственная точка сборки payload из платформенной структуры — её
+    /// делят событие для оверлея (`emit_source_app`) и запрос главного окна
+    /// (`get_source_app`). Шапка в двух окнах обязана показывать одно и то
+    /// же приложение одними и теми же полями, а не два похожих набора.
+    fn from_source(source: macos::SourceApp) -> Self {
+        Self {
+            name: source.name,
+            icon: source
+                .icon_png_base64
+                .map(|b64| format!("data:image/png;base64,{b64}")),
+        }
+    }
+}
+
 /// Шлёт панели, из какого приложения вызвали запись. Зовётся с фонового
 /// потока (см. `hotkey_pressed`) — к этому моменту запись уже идёт.
 fn emit_source_app(app: &AppHandle, source: macos::SourceApp) {
-    let payload = SourceAppPayload {
-        name: source.name,
-        icon: source
-            .icon_png_base64
-            .map(|b64| format!("data:image/png;base64,{b64}")),
-    };
-    let _ = app.emit_to("overlay", "app:source", payload);
+    let _ = app.emit_to("overlay", "app:source", SourceAppPayload::from_source(source));
+}
+
+/// Приложение-источник для ШАПКИ главного окна и для решения, доступна ли в
+/// нём кнопка Paste. Читает тот же `prev_app_pid`, что использует
+/// `paste_text`, — второго понятия «куда вставлять» не заводится.
+///
+/// `None` значит ровно одно: цели нет — либо окно открыли без
+/// предшествующей диктовки (`prev_app_pid` пуст), либо приложение с тех пор
+/// закрылось и `resolve_app` не находит процесс. Фронтенд показывает оба
+/// случая одинаково: шапка «No source app», кнопка Paste выключена с
+/// объяснением.
+///
+/// Команда асинхронная и уводит работу в `spawn_blocking` не для красоты:
+/// синхронная команда Tauri выполняется на главном потоке, а `resolve_app`
+/// форкает до трёх системных инструментов (`ps`, `PlistBuddy`, `sips`) — на
+/// главном потоке это заметное подвисание окна. Сама функция разрешения та
+/// же, что у оверлея (`hotkey_pressed` зовёт её на своём фоновом потоке), а
+/// не вторая: ни AppleScript, ни системного диалога прав здесь не возникает.
+#[tauri::command]
+pub async fn get_source_app(app: AppHandle) -> Option<SourceAppPayload> {
+    let pid = {
+        let state = app.state::<AppState>();
+        let pid = *state.prev_app_pid.lock().unwrap();
+        pid
+    }?;
+    tauri::async_runtime::spawn_blocking(move || macos::resolve_app(pid))
+        .await
+        .ok()
+        .flatten()
+        .map(SourceAppPayload::from_source)
 }
 
 /// Правило дозаписи целиком: **панель открыта и в ней есть текст** — запись
@@ -483,6 +522,29 @@ fn is_append_session(app: &AppHandle) -> bool {
         .and_then(|w| w.is_visible().ok())
         .unwrap_or(false);
     visible && *app.state::<AppState>().overlay_has_text.lock().unwrap()
+}
+
+/// Какой PID запомнить как приложение-источник, когда начинается новая (не
+/// дозапись) сессия. `current` — то, что уже запомнено, `frontmost` — то, что
+/// отдал `macos::frontmost_pid()`, `own_pid` — PID самого Slaive.
+///
+/// Единственное правило, ради которого функция существует: **Slaive не может
+/// быть целью вставки**. Хоткей глобальный, поэтому запись можно начать,
+/// когда впереди сам Slaive — с открытым главным окном это уже не крайний
+/// случай, а обычный ход событий (Follow → правки в главном окне → вспомнил,
+/// что сказать ещё → зажал хоткей). Оверлей фокуса не забирает, но
+/// `frontmost_pid()` в этот момент честно вернёт PID Slaive, и без этой
+/// проверки прежняя цель была бы затёрта им: Paste после этого отправлял бы
+/// Cmd+V в собственное окно приложения.
+///
+/// Во всех остальных случаях поведение прежнее, включая `None` от
+/// `frontmost_pid()` (osascript не ответил): цель снимается, и `paste_text`
+/// вставляет в то, что активно на момент вставки.
+fn next_source_pid(current: Option<i32>, frontmost: Option<i32>, own_pid: i32) -> Option<i32> {
+    match frontmost {
+        Some(pid) if pid == own_pid => current,
+        other => other,
+    }
 }
 
 /// Хоткей зажат: показываем панель и начинаем запись.
@@ -511,8 +573,19 @@ pub fn hotkey_pressed(app: &AppHandle) {
         // вместо приложения, откуда пришла запись. Приложение-источник у
         // накопленного текста одно на всю сессию — то, где нажали хоткей в
         // первый раз.
-        let pid = crate::macos::frontmost_pid();
-        *app.state::<AppState>().prev_app_pid.lock().unwrap() = pid;
+        //
+        // Вторая, отдельная защита — `next_source_pid`: даже при новой записи
+        // Slaive не может стать целью вставки сам (см. её doc-комментарий).
+        // frontmost_pid() — osascript, он блокирует поток; спрашиваем его ДО
+        // взятия блокировки, а не под ней.
+        let frontmost = crate::macos::frontmost_pid();
+        let own_pid = std::process::id() as i32;
+        let pid = {
+            let state = app.state::<AppState>();
+            let mut slot = state.prev_app_pid.lock().unwrap();
+            *slot = next_source_pid(*slot, frontmost, own_pid);
+            *slot
+        };
 
         // Разрешение имени/иконки приложения-источника — три форка system-
         // инструментов (ps, PlistBuddy, при наличии иконки ещё и sips) — на
@@ -1228,6 +1301,25 @@ pub fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// Убирает главное окно и возвращает приложению политику Accessory —
+/// ЕДИНСТВЕННОЕ место, которое знает, как главное окно уходит с экрана.
+/// Зовётся из двух мест, и оба обязаны делать одно и то же: обработчик
+/// `CloseRequested` в main.rs (крестик окна) и фронтенд после успешной
+/// вставки (см. onPaste в MainWindow.tsx). Без возврата политики в
+/// Accessory в доке оставалась бы иконка приложения, у которого больше нет
+/// ни одного открытого окна.
+///
+/// Окно не уничтожается, а прячется — оно синглтон, объявленный в
+/// tauri.conf.json, и `follow_to_main_window` обязан найти его снова.
+#[tauri::command]
+pub fn hide_main_window(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+}
+
 /// Follow из оверлея: главное окно получает текущий текст расшифровки и
 /// поднимается наверх, оверлей прячется. Окно — синглтон, объявленный
 /// статически в tauri.conf.json (как overlay/settings), поэтому «поднять уже
@@ -1266,6 +1358,26 @@ mod tests {
     /// ("Super" для Cmd), так что строка по умолчанию должна быть именно
     /// такой формы — иначе `Settings::default().hotkey` не разберётся тем
     /// же парсером, что и хоткей, записанный руками в настройках.
+    /// Главное окно фокус забирает (в отличие от оверлея), поэтому в момент
+    /// нажатия хоткея впереди может стоять сам Slaive. Запомнить его PID
+    /// значило бы направить Paste в собственное окно приложения — и из
+    /// панели, и из главного окна сразу, потому что цель у них одна.
+    #[test]
+    fn own_pid_never_becomes_the_paste_target() {
+        assert_eq!(next_source_pid(Some(42), Some(777), 777), Some(42));
+        // Цели ещё не было — Slaive впереди её и не создаёт.
+        assert_eq!(next_source_pid(None, Some(777), 777), None);
+    }
+
+    /// Всё остальное — прежнее поведение, менять его эта проверка не должна.
+    #[test]
+    fn foreign_pid_replaces_the_previous_target() {
+        assert_eq!(next_source_pid(Some(42), Some(99), 777), Some(99));
+        // osascript не ответил: цель снимается, как и раньше — вставка
+        // уйдёт в то, что активно на момент нажатия Paste.
+        assert_eq!(next_source_pid(Some(42), None, 777), None);
+    }
+
     #[test]
     fn default_hotkey_accelerator_parses() {
         assert!(validate_hotkey("Super+KeyT".to_string()).is_ok());

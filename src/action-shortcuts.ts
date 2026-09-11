@@ -19,7 +19,7 @@ export type ActionShortcuts = Record<ActionShortcutKey, string>
 // — та же роль, что у DEFAULT_PASTE_SHORTCUT в shortcut.ts: заглушка до
 // первого ответа get_settings, дальше её перекрывают реальные значения.
 //
-// Почему все четыре с Cmd. Поле текста в главном окне — CodeMirror с Vim.
+// Почему все пять с Cmd. Поле текста в главном окне — CodeMirror с Vim.
 // В normal-режиме любая голая буква это команда, в insert-режиме голая буква
 // это ввод, а Ctrl-комбинации разобраны и там и там (Ctrl-r, Ctrl-o, Ctrl-w,
 // Ctrl-v…). Модификатора Cmd в грамматике Vim нет вовсе — поэтому Cmd+буква
@@ -31,11 +31,15 @@ export type ActionShortcuts = Record<ActionShortcutKey, string>
 // Буквы — мнемоника действия. Translate получил L («language»), а не T:
 // Cmd+T занят глобальным хоткеем записи, и глобальная регистрация съела бы
 // его раньше, чем нажатие дошло бы до окна.
+// Summarize взял Cmd+U — вторую букву слова: S занят Shorten, а Cmd+M
+// (следующая мнемоника) это системный Minimize, который меню приложения
+// перехватывает раньше, чем нажатие дойдёт до окна.
 export const DEFAULT_ACTION_SHORTCUTS: ActionShortcuts = {
   translateShortcut: 'Super+KeyL',
   askAiShortcut: 'Super+KeyK',
   fixShortcut: 'Super+KeyF',
   shortenShortcut: 'Super+KeyS',
+  summarizeShortcut: 'Super+KeyU',
 }
 
 /** Сколько пунктов подменю получают позиционный хоткей. Больше девяти в

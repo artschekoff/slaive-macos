@@ -19,7 +19,10 @@ export type SettingKey =
   | 'askAiShortcut'
   | 'fixShortcut'
   | 'shortenShortcut'
+  | 'summarizeShortcut'
+  | 'mainPasteShortcut'
   | 'ai'
+  | 'translateLanguages'
 
 export type SectionId = 'audio' | 'models' | 'recognition' | 'shortcuts' | 'ai'
 
@@ -34,9 +37,15 @@ export type Section = {
 }
 
 /**
- * Хоткеи действий главного окна (Translate/Ask AI/Fix/Shorten) живут здесь же,
- * а не в разделе AI: раздел AI — про то, КУДА уходит текст (провайдер, ключ,
- * адрес), а это управление, как и остальные комбинации.
+ * Хоткеи действий главного окна (Translate/Ask AI/Fix/Shorten/Summarize) живут
+ * здесь же, а не в разделе AI: они управление, как и остальные комбинации, —
+ * какую клавишу нажать, а не что произойдёт с текстом.
+ *
+ * Языки перевода (`translateLanguages`), наоборот, лежат в AI: это ровно
+ * «обработка уже готового текста» — из них строится подменю Translate, то есть
+ * какие запросы к модели вообще можно попросить. В Recognition их класть
+ * нельзя: там язык ВХОДА для whisper, и два разных «языка» в одном разделе
+ * читались бы как одна настройка.
  *
  * Логика деления: Audio — что попадает в микрофон; Models — что скачивается и
  * занимает диск; Recognition — как звук превращается в текст; Shortcuts —
@@ -80,13 +89,15 @@ export const SECTIONS: readonly Section[] = [
       'askAiShortcut',
       'fixShortcut',
       'shortenShortcut',
+      'summarizeShortcut',
+      'mainPasteShortcut',
     ],
   },
   {
     id: 'ai',
     title: 'AI',
     summary: 'What happens to the text after it is recognized.',
-    settings: ['ai'],
+    settings: ['ai', 'translateLanguages'],
   },
 ]
 

@@ -22,7 +22,11 @@ import {
 } from './api'
 import { effectiveBaseUrl, isSelectable, emptyProviderConfig, type AiProviderInfo } from './ai'
 import { SECTIONS, FIRST_SECTION, type SectionId } from './settings-sections'
-import type { ActionShortcutKey } from './action-tree'
+import {
+  DEFAULT_TRANSLATE_LANGUAGES,
+  parseLanguageList,
+  type ActionShortcutKey,
+} from './action-tree'
 import { formatBytes } from './format'
 
 // Границы ползунков. Второй источник правды рядом с Rust (audio.rs:
@@ -36,13 +40,14 @@ const MIN_VAD_THRESHOLD = 0.1
 const MAX_VAD_THRESHOLD = 0.9
 
 // Подписи строк раздела Shortcuts для действий главного окна — один список,
-// а не четыре скопированных блока разметки: добавление пятого действия это
-// строка здесь, ключ в SettingKey и поле в Settings (см. action-tree.ts).
+// а не пять скопированных блоков разметки: добавление действия это строка
+// здесь, ключ в SettingKey и поле в Settings (см. action-tree.ts).
 const ACTION_SHORTCUT_ROWS: readonly { key: ActionShortcutKey; label: string }[] = [
   { key: 'translateShortcut', label: 'Translate' },
   { key: 'askAiShortcut', label: 'Ask AI' },
   { key: 'fixShortcut', label: 'Fix' },
   { key: 'shortenShortcut', label: 'Shorten' },
+  { key: 'summarizeShortcut', label: 'Summarize' },
 ]
 
 const ACTION_MODIFIER_ERROR =
@@ -206,6 +211,16 @@ export function Settings() {
       : `Last recording peaked at ${peak.toFixed(3)} → ${Math.min(1, peak * s.micGain).toFixed(
           3
         )} at current gain.`
+
+  // Что реально окажется в подменю Translate при текущем содержимом поля —
+  // через ту же функцию, что строит меню, а не через отдельный разбор рядом:
+  // иначе подсказка и меню разъехались бы на первом же краевом случае
+  // (пустое поле, повторы, лишние запятые).
+  const parsedLanguages = parseLanguageList(s.translateLanguages)
+  const translateMenuPreview =
+    parsedLanguages.length > 0
+      ? parsedLanguages.join(', ')
+      : `${DEFAULT_TRANSLATE_LANGUAGES} (default)`
 
   const aiProviderInfo = aiProviders.find((p) => p.id === s.ai.provider)
   const aiConfig = s.ai.providers[s.ai.provider] ?? emptyProviderConfig()
@@ -552,6 +567,25 @@ export function Settings() {
         <code>Cmd + 2</code> and so on by position — those aren't stored and can't be reassigned.
       </p>
 
+      {/* Paste главного окна — своя строка, а не пункт ACTION_SHORTCUT_ROWS:
+          тот список построен по узлам дерева действий (ActionShortcutKey), а
+          Paste не действие меню и в дерево не входит — он отправляет готовый
+          текст обратно в приложение-источник. */}
+      <label>
+        Paste
+        <ShortcutCapture
+          value={s.mainPasteShortcut}
+          onChange={(accel) => patch({ mainPasteShortcut: accel })}
+          requireModifier
+          modifierError={ACTION_MODIFIER_ERROR}
+        />
+      </label>
+      <p className="hint">
+        Sends the text in the main window back to the app you dictated from — the same place the
+        panel's Paste sends it. It has its own combination because the panel's default is a bare{' '}
+        <code>Enter</code>, and in the main window Enter belongs to the editor.
+      </p>
+
       {ACTION_SHORTCUT_ROWS.map(({ key, label }) => (
         <label key={key}>
           {label}
@@ -653,6 +687,31 @@ export function Settings() {
       </div>
       {aiTestResult && <span className="ok">{aiTestResult}</span>}
       {aiTestError && <span className="err">{aiTestError}</span>}
+
+      {/* Языки перевода — в разделе AI, а не в Recognition: там язык ВХОДА
+          для whisper, и две разные настройки с одинаковым словом «язык» в
+          одном разделе читались бы как одна. Здесь это «что делают с уже
+          распознанным текстом» — ровно подпись этого раздела. */}
+      <h2>Translation languages</h2>
+      <label>
+        Languages
+        <textarea
+          className="dictionary"
+          rows={3}
+          value={s.translateLanguages}
+          placeholder={DEFAULT_TRANSLATE_LANGUAGES}
+          onChange={(e) => patch({ translateLanguages: e.target.value })}
+        />
+      </label>
+      <p className="hint">
+        The Translate menu in the main window is built from this list — one language per line, or
+        separated by commas. Plain names, the way you'd say them: the model understands "Spanish"
+        as well as any code. The first nine get <code>Cmd + 1</code> … <code>Cmd + 9</code> in the
+        order written here; a tenth and beyond still work, just without a number on the button.
+        Leaving the field empty means "not chosen", not "no languages": the menu falls back to{' '}
+        {DEFAULT_TRANSLATE_LANGUAGES}.
+      </p>
+      <p className="hint">Translate will offer: {translateMenuPreview}</p>
     </>
   )
 

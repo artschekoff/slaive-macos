@@ -2,8 +2,16 @@
 // см. бриф ("Тесты"). Сеть, DOM и Tauri здесь не участвуют.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { ACTION_TREE } from './action-tree.ts'
-import { rootMenuState, isRoot, currentLevel, enterNode, goBack, menuDepth } from './menu-state.ts'
+import { ACTION_TREE, buildActionTree } from './action-tree.ts'
+import {
+  rootMenuState,
+  isRoot,
+  currentLevel,
+  currentLevelLabel,
+  enterNode,
+  goBack,
+  menuDepth,
+} from './menu-state.ts'
 
 test('root state starts at the root of ACTION_TREE and is flagged as root', () => {
   const s = rootMenuState()
@@ -12,10 +20,24 @@ test('root state starts at the root of ACTION_TREE and is flagged as root', () =
   assert.equal(menuDepth(s), 1)
 })
 
-test('root exposes exactly the four actions from the brief', () => {
+test('root exposes exactly the five actions from the brief', () => {
   const s = rootMenuState()
   const ids = currentLevel(s).map((n) => n.id)
-  assert.deepEqual(ids, ['translate', 'ask-ai', 'fix', 'shorten'])
+  assert.deepEqual(ids, ['translate', 'ask-ai', 'fix', 'shorten', 'summarize'])
+})
+
+// Дерево живого окна строится из настройки языков, а не берётся из ACTION_TREE
+// (см. buildActionTree) — корень обхода обязан уметь стартовать с него, иначе
+// меню показывало бы дефолтные языки, что бы ни стояло в настройках.
+test('root state starts from the tree it was given, not from the default one', () => {
+  const tree = buildActionTree('German')
+  const s = rootMenuState(tree)
+  assert.equal(currentLevel(s), tree)
+  const translate = currentLevel(s).find((n) => n.id === 'translate')!
+  assert.deepEqual(
+    currentLevel(enterNode(s, translate)).map((n) => n.label),
+    ['German']
+  )
 })
 
 test('entering a branch node drills into its children and leaves the root', () => {
@@ -25,7 +47,7 @@ test('entering a branch node drills into its children and leaves the root', () =
   assert.equal(isRoot(next), false)
   assert.equal(menuDepth(next), 2)
   const ids = currentLevel(next).map((n) => n.id)
-  assert.deepEqual(ids, ['translate-en', 'translate-ru'])
+  assert.deepEqual(ids, ['translate-english', 'translate-spanish', 'translate-russian'])
 })
 
 test('entering a leaf node does not change the menu state', () => {
@@ -79,4 +101,27 @@ test('goBack twice from a two-level drill returns exactly to the root, no furthe
   const back2 = goBack(back1) // уже в корне — no-op
   assert.equal(isRoot(back1), true)
   assert.equal(back2, back1)
+})
+
+// Полоса возврата главного окна отвечает не только за «назад», но и за «где
+// я» (см. MainWindow.tsx). Подпись приходит отсюда, поэтому проверяется тут,
+// а не глазами по разметке.
+test('level label names the branch you are inside, not the items in it', () => {
+  const s = rootMenuState()
+  const translate = currentLevel(s).find((n) => n.id === 'translate')!
+  assert.equal(currentLevelLabel(enterNode(s, translate)), 'Translate')
+})
+
+test('level label inside the prompt form is the prompt action itself', () => {
+  const s = rootMenuState()
+  const askAi = currentLevel(s).find((n) => n.id === 'ask-ai')!
+  assert.equal(currentLevelLabel(enterNode(s, askAi)), 'Ask AI')
+})
+
+test('root has no level label — there is nothing to go back to', () => {
+  assert.equal(currentLevelLabel(rootMenuState()), null)
+  // И после возврата из подменю она снова пропадает, а не залипает.
+  const s = rootMenuState()
+  const translate = currentLevel(s).find((n) => n.id === 'translate')!
+  assert.equal(currentLevelLabel(goBack(enterNode(s, translate))), null)
 })

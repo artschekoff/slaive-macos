@@ -44,6 +44,8 @@ fn main() {
             commands::check_accessibility_permission,
             commands::open_settings_window,
             commands::follow_to_main_window,
+            commands::hide_main_window,
+            commands::get_source_app,
             commands::set_overlay_has_text,
         ])
         .setup(|app| {
@@ -112,17 +114,17 @@ fn main() {
             // hide — тот же приём, которым оверлей и настройки прячутся, а не
             // закрываются по-настоящему. Заодно возвращаем activation policy
             // обратно в Accessory: главное окно закрыто — Dock-иконка не
-            // нужна, приложение снова только в строке меню.
+            // нужна, приложение снова только в строке меню. И то и другое
+            // делает `commands::hide_main_window`, а не этот обработчик:
+            // после успешной вставки окно уходит с экрана тем же путём (см.
+            // её doc-комментарий), и знать, «как именно главное окно
+            // убирается», должно одно место.
             if let Some(main_window) = app.get_webview_window("main") {
                 let app_handle = app.handle().clone();
                 main_window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
-                        if let Some(w) = app_handle.get_webview_window("main") {
-                            let _ = w.hide();
-                        }
-                        #[cfg(target_os = "macos")]
-                        let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                        commands::hide_main_window(app_handle.clone());
                     }
                 });
             }

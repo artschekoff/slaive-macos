@@ -12,8 +12,12 @@ export type MenuState = {
   prompt: PromptNode | null
 }
 
-export function rootMenuState(): MenuState {
-  return { stack: [ACTION_TREE], prompt: null }
+/** Корень обхода. Дерево передаётся аргументом, потому что подменю Translate
+ *  строится из настройки и у живого окна дерево своё (см. buildActionTree);
+ *  дефолт — дерево с языками по умолчанию, им пользуются тесты и состояние до
+ *  первого ответа get_settings. */
+export function rootMenuState(tree: MenuNode[] = ACTION_TREE): MenuState {
+  return { stack: [tree], prompt: null }
 }
 
 /** В корне ли меню — ни на одном подуровне, ни в форме запроса. */
@@ -31,6 +35,27 @@ export function currentLevel(state: MenuState): MenuNode[] {
  *  "стало глубже" / "стало мельче" не завязано на konkretные узлы. */
 export function menuDepth(state: MenuState): number {
   return state.stack.length + (state.prompt ? 1 : 0)
+}
+
+/**
+ * Подпись того, ВНУТРИ ЧЕГО пользователь сейчас находится — «Translate» на
+ * уровне языков, «Ask AI» в форме свободного запроса. `null` в корне: там
+ * нет объемлющего действия, и полоса возврата не показывается вовсе.
+ *
+ * Ищем владельца текущего уровня в РОДИТЕЛЬСКОМ уровне, а не обходом всего
+ * дерева: `enterNode` кладёт в стек `node.children` тем же массивом, что
+ * лежит на узле, поэтому владелец находится сравнением ссылок — точно и без
+ * предположения об уникальности подписей. Хранить сам узел в `MenuState`
+ * было бы вторым источником правды о том, где мы находимся; стек уже это
+ * знает.
+ */
+export function currentLevelLabel(state: MenuState): string | null {
+  if (state.prompt !== null) return state.prompt.label
+  if (state.stack.length <= 1) return null
+  const items = currentLevel(state)
+  const parent = state.stack[state.stack.length - 2]
+  const owner = parent.find((n) => n.kind === 'branch' && n.children === items)
+  return owner ? owner.label : null
 }
 
 /** Вход в узел: branch — проваливается на уровень его детей; prompt —

@@ -80,22 +80,50 @@ pub struct Settings {
     /// Хоткей копирования текста в панели — та же оговорка, что у
     /// `paste_shortcut`: окно-локальный, не глобальный.
     pub copy_shortcut: String,
-    /// Хоткеи действий главного окна (Translate / Ask AI / Fix / Shorten) —
-    /// та же оговорка, что у `paste_shortcut`/`copy_shortcut`: окно-локальные,
-    /// перехватываются обычным keydown внутри окна `main` (см. MainWindow.tsx),
-    /// а не через tauri-plugin-global-shortcut. Хранятся четырьмя отдельными
-    /// полями, а не картой «id действия → комбинация»: состав действий задан
-    /// в коде (src/action-tree.ts), а не пользователем, и плоские поля дают
-    /// тот же разбор в serde и ту же проверку типом на фронтенде, что и
-    /// остальные настройки.
+    /// Хоткеи действий главного окна (Translate / Ask AI / Fix / Shorten /
+    /// Summarize) — та же оговорка, что у `paste_shortcut`/`copy_shortcut`:
+    /// окно-локальные, перехватываются обычным keydown внутри окна `main`
+    /// (см. MainWindow.tsx), а не через tauri-plugin-global-shortcut.
+    /// Хранятся отдельными полями, а не картой «id действия → комбинация»:
+    /// состав действий задан в коде (src/action-tree.ts), а не пользователем,
+    /// и плоские поля дают тот же разбор в serde и ту же проверку типом на
+    /// фронтенде, что и остальные настройки.
     /// ponytail: если действия станут пользовательскими, заменить на карту.
     pub translate_shortcut: String,
     pub ask_ai_shortcut: String,
     pub fix_shortcut: String,
     pub shorten_shortcut: String,
+    pub summarize_shortcut: String,
+    /// Хоткей кнопки Paste ГЛАВНОГО окна — отдельное поле от
+    /// `paste_shortcut`, хотя действие в обоих окнах одно и то же («отправить
+    /// текст туда, откуда пришла диктовка»). Причина в клавише, а не в
+    /// действии: у панели дефолт — голый `Enter`, и в её редакторе он
+    /// перехвачен vim-экшеном `slaivePaste` (см. Overlay.tsx). В главном окне
+    /// такого экшена нет, и голый `Enter` там означал бы ровно то, что ему и
+    /// положено означать в редакторе, — перенос строки. Поэтому у главного
+    /// окна своя комбинация, и она с модификатором, как и остальные четыре
+    /// его хоткея.
+    pub main_paste_shortcut: String,
     /// Настройки ИИ-провайдеров — модель и адрес на каждого, БЕЗ ключей
     /// (они в Keychain). См. `AiSettings`.
     pub ai: AiSettings,
+    /// Языки, на которые переводит подменю Translate главного окна, — обычные
+    /// НАЗВАНИЯ через запятую или с новой строки ("English, Spanish,
+    /// Russian"), а не ISO-коды и не выбор из каталога. Модель одинаково
+    /// понимает и то и другое, а список названий правится в одном поле — в
+    /// отличие от каталога на две сотни языков, из которого нужны три.
+    ///
+    /// Хранится строкой, как `dictionary` ниже, а не `Vec<String>`: поле в
+    /// настройках одно и текстовое, и разбор «строка → список» тогда живёт в
+    /// одном месте (см. `parseLanguageList` в src/action-tree.ts), а не
+    /// делится между склейкой в интерфейсе и разбором на бэкенде.
+    ///
+    /// Пустая строка — не «переводить некуда», а «не выбрано»: подменю тогда
+    /// строится из дефолта (см. buildActionTree), потому что пустой список
+    /// даёт только мёртвый пункт меню и никакого полезного смысла не несёт.
+    /// Этим настройка отличается от `dictionary`, где пустота как раз
+    /// означает «ничего не подсказывать whisper».
+    pub translate_languages: String,
     /// Множитель усиления микрофона, применяемый к PCM ПЕРЕД VAD и whisper
     /// (см. `audio::apply_gain`). Тихий микрофон бьёт дважды: whisper на
     /// тихом входе распознаёт хуже, а VAD с порогом вероятности может не
@@ -138,6 +166,13 @@ pub struct Settings {
 /// потолок 224 токена. Причём лишнее отбрасывается с НАЧАЛА списка и молча:
 /// длинный словарь не расширит охват, а тихо потеряет первую половину.
 /// Поэтому здесь плотный список коротких терминов, а не связный текст.
+/// Дефолтные языки перевода. Те же три, что видит пользователь в поле
+/// настроек, — и та же строка, из которой строится подменю Translate, когда
+/// поле пусто (см. `translate_languages`). Дублируется на фронтенде
+/// (DEFAULT_TRANSLATE_LANGUAGES в src/action-tree.ts) ровно как остальные
+/// дефолты: там это заглушка до первого ответа get_settings.
+pub const DEFAULT_TRANSLATE_LANGUAGES: &str = "English, Spanish, Russian";
+
 pub const DEFAULT_DICTIONARY: &str = "commit, merge, rebase, pull request, branch, revert, deploy, rollback, backend, frontend, endpoint, payload, middleware, migration, schema, query, cache, webhook, latency, throughput, API, REST, GraphQL, gRPC, JWT, OAuth, CORS, component, props, hook, render, bundle, hydration, TypeScript, React, Kubernetes, Docker, container, pod, namespace, ingress, Helm, Terraform, pipeline, artifact, rollout, canary, load balancer, autoscaling, Prometheus, Grafana, Google Cloud, BigQuery, Cloud Run, Pub/Sub, Firestore, GKE, IAM, Cloud Storage, Secret Manager, Cloud Build, AWS, EC2, S3, Lambda, DynamoDB, RDS, ECS, EKS, Fargate, CloudWatch";
 
 impl Default for Settings {
@@ -171,7 +206,18 @@ impl Default for Settings {
             fix_shortcut: "Super+KeyF".to_string(),
             // Cmd+S — мнемоника Shorten; сохранять в главном окне нечего.
             shorten_shortcut: "Super+KeyS".to_string(),
+            // Cmd+U — вторая буква Summarize: S уже у Shorten, а Cmd+M
+            // (третья по мнемонике) — системный Minimize, его перехватывает
+            // меню приложения раньше, чем нажатие дойдёт до окна. Cmd+U ни в
+            // стандартном меню macOS, ни в Vim ничем не занят.
+            summarize_shortcut: "Super+KeyU".to_string(),
+            // Cmd+Enter — сложившееся «отправить» в окнах, где сначала пишут,
+            // а потом отдают написанное. В грамматике Vim Cmd нет, поэтому
+            // комбинация не отбирает Enter ни у insert-режима (перенос
+            // строки), ни у normal-режима.
+            main_paste_shortcut: "Super+Enter".to_string(),
             ai: AiSettings::default(),
+            translate_languages: DEFAULT_TRANSLATE_LANGUAGES.to_string(),
             // 1.0 — «как было до появления ползунка»: настройка не должна
             // менять звук у тех, кто её не трогал.
             mic_gain: crate::audio::DEFAULT_GAIN,
@@ -274,6 +320,12 @@ mod tests {
         assert_eq!(s.ask_ai_shortcut, "Super+KeyK");
         assert_eq!(s.fix_shortcut, "Super+KeyF");
         assert_eq!(s.shorten_shortcut, "Super+KeyS");
+        // Не Cmd+S (занят Shorten) и не Cmd+M (системный Minimize).
+        assert_eq!(s.summarize_shortcut, "Super+KeyU");
+        // Cmd+Enter, а не голый Enter как у панели: в главном окне Enter
+        // принадлежит редактору (см. комментарий у поля).
+        assert_eq!(s.main_paste_shortcut, "Super+Enter");
+        assert_eq!(s.translate_languages, "English, Spanish, Russian");
         assert_eq!(s.mic_gain, 1.0);
         assert_eq!(s.vad_threshold, 0.5);
         assert_eq!(s.input_device, None);
@@ -302,10 +354,13 @@ mod tests {
             ask_ai_shortcut: "Ctrl+KeyK".into(),
             fix_shortcut: "Ctrl+KeyF".into(),
             shorten_shortcut: "Ctrl+KeyS".into(),
+            summarize_shortcut: "Ctrl+KeyU".into(),
+            main_paste_shortcut: "Ctrl+Enter".into(),
             ai: AiSettings {
                 provider: "openai".into(),
                 providers,
             },
+            translate_languages: "German\nJapanese".into(),
             mic_gain: 3.5,
             vad_threshold: 0.35,
             input_device: Some("Пётр's iPhone Microphone".into()),
@@ -375,6 +430,13 @@ mod tests {
         assert_eq!(second.ask_ai_shortcut, "Ctrl+KeyK");
         assert_eq!(second.fix_shortcut, "Ctrl+KeyF");
         assert_eq!(second.shorten_shortcut, "Ctrl+KeyS");
+        // Полей mainPasteShortcut, summarizeShortcut и translateLanguages в
+        // этом файле нет — он написан версией до кнопки Paste в главном окне и
+        // до Summarize. Они обязаны взять дефолт и не мешать читаться соседям,
+        // а не уронить загрузку целиком.
+        assert_eq!(second.main_paste_shortcut, "Super+Enter");
+        assert_eq!(second.summarize_shortcut, "Super+KeyU");
+        assert_eq!(second.translate_languages, DEFAULT_TRANSLATE_LANGUAGES);
         assert_eq!(second.language, "ru");
         assert_eq!(second.mic_gain, 3.5);
         assert_eq!(second.vad_threshold, 0.35);
@@ -451,8 +513,41 @@ mod tests {
         assert_eq!(s.ask_ai_shortcut, "Super+KeyK");
         assert_eq!(s.fix_shortcut, "Super+KeyF");
         assert_eq!(s.shorten_shortcut, "Super+KeyS");
+        assert_eq!(s.summarize_shortcut, "Super+KeyU");
         // Соседнее поле читается как раньше.
         assert_eq!(s.paste_shortcut, "Shift+Enter");
+    }
+
+    /// Файл, записанный до появления Summarize и списка языков перевода,
+    /// обязан загружаться: отсутствующие поля берут дефолт, а соседние
+    /// читаются как раньше. Та же гарантия, что уже отработана для VAD,
+    /// Paste/Copy, усиления и словаря выше.
+    #[test]
+    fn settings_without_summarize_and_languages_fall_back_to_defaults() {
+        let dir = tmp();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"hotkey":"Alt+Space","shortenShortcut":"Ctrl+KeyS","dictionary":"React"}"#,
+        )
+        .unwrap();
+        let s = load(&dir);
+        assert_eq!(s.summarize_shortcut, "Super+KeyU");
+        assert_eq!(s.translate_languages, DEFAULT_TRANSLATE_LANGUAGES);
+        assert_eq!(s.shorten_shortcut, "Ctrl+KeyS");
+        assert_eq!(s.dictionary, "React");
+    }
+
+    /// Очищенный список языков остаётся очищенным: дефолт serde подставляется
+    /// только при ОТСУТСТВИИ поля. Подменю Translate в этом случае строится из
+    /// дефолта на фронтенде (см. buildActionTree), а не воскрешением значения
+    /// в файле — иначе пользователь чистил бы поле, а оно заполнялось снова.
+    #[test]
+    fn cleared_translate_languages_survive_roundtrip() {
+        let mut s = Settings::default();
+        s.translate_languages = String::new();
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.translate_languages, "");
     }
 
     #[test]

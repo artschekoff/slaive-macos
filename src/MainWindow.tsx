@@ -1,9 +1,18 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import type { EditorView } from '@codemirror/view'
 import { createTranscriptEditor, resetEditorContent, watchVimMode, type VimMode } from './transcript-editor'
-import { rootMenuState, currentLevel, enterNode, goBack, isRoot, menuDepth, type MenuState } from './menu-state'
-import type { LeafNode } from './action-tree'
+import {
+  rootMenuState,
+  currentLevel,
+  currentLevelLabel,
+  enterNode,
+  goBack,
+  isRoot,
+  menuDepth,
+  type MenuState,
+} from './menu-state'
+import { buildActionTree, DEFAULT_TRANSLATE_LANGUAGES, type LeafNode } from './action-tree'
 import {
   idleApplyState,
   startRequest,
@@ -13,19 +22,37 @@ import {
   acceptApply,
   type ApplyState,
 } from './apply-state'
-import { runAiAction, cancelAiAction, openSettingsWindow, getSettings, type Settings } from './api'
+import {
+  runAiAction,
+  cancelAiAction,
+  openSettingsWindow,
+  getSettings,
+  getSourceApp,
+  hideMainWindow,
+  checkAccessibilityPermission,
+  copyText,
+  pasteText,
+  openPrivacyPane,
+  type Settings,
+  type SourceApp,
+} from './api'
 import {
   DEFAULT_ACTION_SHORTCUTS,
   nodeForKey,
   shortcutFor,
   type ActionShortcuts,
 } from './action-shortcuts'
-import { formatShortcutBadge } from './shortcut'
+import { formatShortcutBadge, matchesShortcut } from './shortcut'
+
+// Дефолт хоткея Paste главного окна — дублирует Settings::default() на
+// бэкенде (src-tauri/src/settings.rs), как и DEFAULT_ACTION_SHORTCUTS рядом:
+// заглушка до первого ответа get_settings, дальше её перекрывает настройка.
+const DEFAULT_MAIN_PASTE_SHORTCUT = 'Super+Enter'
 
 type FollowPayload = { text: string }
 
 /** Главное окно: текст сверху (неподвижная часть интерфейса — см. бриф), под
- *  ним многоуровневое меню действий (Translate/Ask AI/Fix/Shorten), каждое
+ *  ним многоуровневое меню действий (Translate/Ask AI/Fix/Shorten/Summarize), каждое
  *  из которых уходит в ИИ-провайдер через run_ai_action ТОЛЬКО по явному
  *  нажатию. Единственный способ получить текст в это окно — событие
  *  Follow из оверлея (см. follow:text ниже); само окно ничего не
@@ -39,10 +66,37 @@ export function MainWindow() {
   // источник истины — тот же приём, что в Overlay.tsx.
   const [hasText, setHasText] = useState(false)
   const [vimMode, setVimMode] = useState<VimMode>('normal')
-  const [menuState, setMenuState] = useState<MenuState>(rootMenuState)
+
+  // Языки перевода — настройка, а не константа: из неё строится подменю
+  // Translate (см. action-tree.ts). Держим сырую строку настройки, а дерево
+  // пересобираем только когда она изменилась — иначе каждое settings:changed
+  // (смена хоткея, ключа провайдера) давало бы новый массив узлов и сбрасывало
+  // бы меню в корень на ровном месте.
+  const [rawLanguages, setRawLanguages] = useState(DEFAULT_TRANSLATE_LANGUAGES)
+  const actionTree = useMemo(() => buildActionTree(rawLanguages), [rawLanguages])
+  // Слушатель follow:text навешен один раз на монтировании и замыкает значения
+  // того рендера — дерево ему нужно через ref, иначе после правки языков он
+  // сбрасывал бы меню в корень УСТАРЕВШЕГО дерева. Остальные обработчики
+  // пересоздаются на каждый рендер и читают `actionTree` напрямую.
+  const actionTreeRef = useRef(actionTree)
+  actionTreeRef.current = actionTree
+
+  const [menuState, setMenuState] = useState<MenuState>(() => rootMenuState(actionTree))
+  // Список языков поменяли — состав кнопок другой, и стек меню держит ссылку
+  // на прежнее дерево. Возврат в корень нового дерева: остаться на уровне,
+  // которого больше нет, нельзя, а угадывать соответствие старых пунктов новым
+  // незачем.
+  useEffect(() => {
+    setMenuState(rootMenuState(actionTree))
+  }, [actionTree])
   const [applyState, setApplyState] = useState<ApplyState>(idleApplyState)
   const [actionError, setActionError] = useState<string | null>(null)
   const [promptQuery, setPromptQuery] = useState('')
+  // Модальный слой «нет права на вставку» — тот же, что в оверлее, и по той
+  // же причине: право одно на оба окна (Accessibility), отказ одинаков, и
+  // показывается он СРАЗУ по нажатию Paste, а не после заведомо провальной
+  // попытки (см. onPaste ниже).
+  const [showAccessModal, setShowAccessModal] = useState(false)
 
   // Хоткеи действий — ОКОННЫЕ, не глобальные (см. action-shortcuts.ts):
   // обычный keydown ниже, никакого tauri-plugin-global-shortcut. В состоянии,
@@ -52,18 +106,54 @@ export function MainWindow() {
   // на mount и дальше обновляются событием settings:changed — тот же приём,
   // что у Paste/Copy в Overlay.tsx.
   const [actionShortcuts, setActionShortcuts] = useState<ActionShortcuts>(DEFAULT_ACTION_SHORTCUTS)
+  // Хоткей Paste — отдельным состоянием, а не пятым полем ActionShortcuts:
+  // тот тип описывает ровно узлы дерева действий (ActionShortcutKey), а Paste
+  // не действие меню и в дереве его нет. Грузится и обновляется тем же
+  // эффектом — источник настроек один.
+  const [mainPasteShortcut, setMainPasteShortcut] = useState(DEFAULT_MAIN_PASTE_SHORTCUT)
   useEffect(() => {
     const take = (s: Settings): ActionShortcuts => ({
       translateShortcut: s.translateShortcut,
       askAiShortcut: s.askAiShortcut,
       fixShortcut: s.fixShortcut,
       shortenShortcut: s.shortenShortcut,
+      summarizeShortcut: s.summarizeShortcut,
     })
-    getSettings().then((s) => setActionShortcuts(take(s)))
-    const un = listen<Settings>('settings:changed', (e) => setActionShortcuts(take(e.payload)))
+    const apply = (s: Settings) => {
+      setActionShortcuts(take(s))
+      setMainPasteShortcut(s.mainPasteShortcut)
+      // Строка, а не разобранный список: разбор и запасной дефолт живут в
+      // одном месте (buildActionTree), а сравнение "поменялось ли" здесь
+      // сводится к сравнению строк — новый массив узлов появляется только
+      // когда пользователь реально правил список.
+      setRawLanguages(s.translateLanguages)
+    }
+    getSettings().then(apply)
+    const un = listen<Settings>('settings:changed', (e) => apply(e.payload))
     return () => {
       un.then((f) => f())
     }
+  }, [])
+
+  // Приложение-источник: то же самое, что показывает шапка оверлея, и тот же
+  // PID (prev_app_pid), в который вставляет paste_text. `undefined` — ответа
+  // ещё нет (шапка молчит, чтобы не мигнуть «нет цели» и тут же сменить это
+  // на имя приложения), `null` — цели нет и Paste недоступен.
+  const [sourceApp, setSourceApp] = useState<SourceApp | null | undefined>(undefined)
+  const refreshSourceApp = () => {
+    getSourceApp()
+      .then(setSourceApp)
+      .catch(() => setSourceApp(null))
+  }
+  // Запрашиваем на монтировании, на каждый Follow (см. ниже) и на возврат
+  // фокуса в окно: окно между вызовами не пересоздаётся (прячется/
+  // показывается), а цель за это время могла смениться — пользователь мог
+  // надиктовать из другого приложения или закрыть то, что было запомнено.
+  // Возврат фокуса — единственный момент, когда он снова смотрит на шапку.
+  useEffect(() => {
+    refreshSourceApp()
+    window.addEventListener('focus', refreshSourceApp)
+    return () => window.removeEventListener('focus', refreshSourceApp)
   }, [])
 
   // Монотонный счётчик — каждому запуску действия свой requestId, чтобы
@@ -97,10 +187,14 @@ export function MainWindow() {
     const un = listen<FollowPayload>('follow:text', (e) => {
       const view = viewRef.current
       if (view) resetEditorContent(view, e.payload.text)
-      setMenuState(rootMenuState())
+      setMenuState(rootMenuState(actionTreeRef.current))
       setApplyState(idleApplyState())
       setActionError(null)
       setPromptQuery('')
+      // Текст новый — возможно, и приложение, из которого его надиктовали,
+      // тоже другое. Шапку и доступность Paste перечитываем на каждый Follow,
+      // а не один раз на монтировании.
+      refreshSourceApp()
     })
     return () => {
       un.then((f) => f())
@@ -170,8 +264,66 @@ export function MainWindow() {
     const view = viewRef.current
     if (view) resetEditorContent(view, applyState.original)
     setApplyState(cancelApply(applyState))
-    setMenuState(rootMenuState())
+    setMenuState(rootMenuState(actionTree))
     setPromptQuery('')
+  }
+
+  // Возврат на уровень выше — одна функция на оба входа: полосу ← над сеткой
+  // и Escape. Черновик запроса Ask AI намеренно не чистится: это делают
+  // Accept/Cancel и приход нового текста, а возврат на уровень — навигация, а
+  // не отмена введённого (поведение до переезда кнопки было ровно таким же).
+  const onBack = () => setMenuState(goBack(menuState))
+
+  // Paste доступен только когда есть ЧТО отправлять (текст), КУДА (запомненный
+  // PID разрешился в живое приложение) и когда цикл применения закрыт: в фазе
+  // proposed в редакторе лежит предложение ИИ, и отправить его, минуя явное
+  // Accept, значило бы обойти решение, которое окно специально спрашивает.
+  const canPaste = hasText && applyState.phase === 'idle' && !!sourceApp
+
+  // Полный повтор пути оверлея (см. onPaste в Overlay.tsx), и намеренно тот
+  // же самый: право проверяется ДО попытки, потому что без него вставка
+  // гарантированно провалится, а пользователь увидит это только после
+  // скрытия окна и фиксированной паузы внутри paste_text. Отказ — модальный
+  // слой с дорогой в System Settings, а текст при этом всё равно кладётся в
+  // буфер: копирование прав не требует.
+  //
+  // Окно убирается ДО paste_text, а не после: пока оно на экране, впереди
+  // стоит Slaive, и активировать приложение-цель системе пришлось бы из-под
+  // него. Тот же порядок, что у панели, которая прячет себя первой строкой
+  // paste_text.
+  // ponytail: редкий отказ УЖЕ ПОСЛЕ проверки (право отозвали в эти
+  // миллисекунды, или не создался CGEvent) всплывает в оверлее — paste_text
+  // шлёт свои ошибки туда, — а главное окно к этому моменту уже скрыто. Текст
+  // при этом в буфере, и сообщение оверлея прямо об этом говорит. Усложнять
+  // (адресовать ошибку окну-инициатору) — если этот путь окажется частым.
+  const onPaste = () => {
+    if (!canPaste) return
+    const value = currentText()
+    if (!value) return
+    // Цепочкой, а не двумя параллельными вызовами: порядок «окно ушло →
+    // вставляем» должен быть порядком, а не совпадением. Отказ спрятать окно
+    // вставку не отменяет — paste_text всё равно активирует приложение-цель.
+    const sendToSourceApp = () =>
+      hideMainWindow()
+        .catch(() => {})
+        .then(() => pasteText(value))
+        .catch((e) => setActionError(String(e)))
+
+    checkAccessibilityPermission()
+      .then((allowed) => {
+        if (allowed) return sendToSourceApp()
+        copyText(value).catch(() => {
+          // Даже копирование не удалось — модальный слой остаётся
+          // единственным сообщением, второй баннер поверх него не нужен.
+        })
+        setShowAccessModal(true)
+      })
+      .catch(() => {
+        // Сама проверка права не удалась — не блокируем пользователя слоем
+        // «нет права», в котором не уверены: идём обычным путём, он даст свою
+        // проверенную ошибку, если права и правда нет.
+        void sendToSourceApp()
+      })
   }
 
   const onAccept = () => {
@@ -179,7 +331,7 @@ export function MainWindow() {
     // Текст уже лежит в редакторе (см. эффект синхронизации выше) — Accept
     // просто закрывает цикл и возвращает меню в корень.
     setApplyState(acceptApply(applyState))
-    setMenuState(rootMenuState())
+    setMenuState(rootMenuState(actionTree))
     setPromptQuery('')
   }
 
@@ -199,21 +351,30 @@ export function MainWindow() {
   const showingPrompt = menuState.prompt !== null
   const atRoot = isRoot(menuState)
 
-  // Хоткеи действий: обычный window keydown, как Paste/Copy в оверлее, а НЕ
+  // Хоткеи окна: обычный window keydown, как Paste/Copy в оверлее, а НЕ
   // tauri-plugin-global-shortcut — глобальная регистрация может не удаться,
   // конфликтует с другими приложениями и срабатывала бы даже когда окна не
-  // видно. Проверку "в фокусе ли редактор" делать не нужно: дефолты все на
-  // Cmd, а переназначить на голую клавишу настройки не дают (см.
-  // ShortcutCapture в Settings.tsx), Cmd же в грамматике Vim не встречается —
-  // тот же довод, по которому Copy в Overlay.tsx работает независимо от
-  // фокуса.
+  // видно. Все комбинации здесь с Cmd (переназначить на голую клавишу
+  // настройки не дают, см. ShortcutCapture в Settings.tsx), а Cmd в
+  // грамматике Vim не встречается — поэтому спрашивать «в фокусе ли
+  // редактор» им не нужно, тот же довод, что у Copy в Overlay.tsx.
+  //
+  // Слушатель висит на ФАЗЕ ПЕРЕХВАТА (capture), а не всплытия, и это нужно
+  // ровно ради Escape. Редактор здесь — тот же CodeMirror с Vim, и на
+  // всплытии Escape до окна уже не доходит: vim разбирает его сам. На
+  // перехвате нажатие видно ДО редактора, а значит `vimMode` в этот момент —
+  // гарантированно режим ДО этой клавиши, а не после (та самая гонка, из-за
+  // которой Overlay.tsx режим в обработчике читать не может: там слушатель
+  // на всплытии). Единственное, что отдаём редактору, — Escape в insert:
+  // это выход в normal, и отбирать его нельзя.
   //
   // Условия недоступности — ровно те же, что у самих кнопок, и проверяются
   // ОДИН раз здесь, а не дублируются по действиям: пустой текст и не-idle фаза
   // (кнопки disabled / вместо меню показана панель Accept/Cancel/Working),
-  // открытая форма Ask AI (кнопок уровня на экране нет — есть Send/Back).
-  // Какие кнопки сейчас нарисованы, решает `level`: хоткей действия, до
-  // которого не добрались меню, не сработает по построению.
+  // открытая форма Ask AI (кнопок уровня на экране нет — есть Send). Какие
+  // кнопки сейчас нарисованы, решает `level`: хоткей действия, до которого не
+  // добрались меню, не сработает по построению. У Paste своё условие —
+  // `canPaste`, то же самое, что выключает кнопку в шапке.
   //
   // Эффект без списка зависимостей — намеренно, тот же приём, что у
   // prevDepthRef ниже: обработчик читает половину состояния окна (текст,
@@ -223,6 +384,38 @@ export function MainWindow() {
   // навешен один раз. Устаревшего замыкания при этом не бывает по построению.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const editorFocused = viewRef.current?.hasFocus ?? false
+
+      if (e.key === 'Escape') {
+        // Слой права не должен быть ловушкой — тот же приём, что в оверлее:
+        // Escape закрывает его раньше всего остального, независимо от фокуса.
+        if (showAccessModal) {
+          e.preventDefault()
+          setShowAccessModal(false)
+          return
+        }
+        if (editorFocused && vimMode === 'insert') return // выход в normal — не наше дело
+        // Возврат на уровень выше — то же, что делает полоса ← над сеткой.
+        // В корне не делаем ничего: закрывать окно по Escape никто не просил,
+        // а «ничего» здесь честнее, чем придуманное действие.
+        if (applyState.phase === 'idle' && !atRoot) {
+          e.preventDefault()
+          onBack()
+        }
+        return
+      }
+
+      // Пока открыт слой права, окно ничего больше не слушает: у слоя ровно
+      // два выхода — Open Settings и Close.
+      if (showAccessModal) return
+
+      if (matchesShortcut(e, mainPasteShortcut)) {
+        if (!canPaste) return
+        e.preventDefault()
+        onPaste()
+        return
+      }
+
       if (!hasText || applyState.phase !== 'idle' || showingPrompt) return
       const node = nodeForKey(e, level, atRoot, actionShortcuts)
       if (!node) return
@@ -230,8 +423,8 @@ export function MainWindow() {
       if (node.kind === 'leaf') onLeafClick(node)
       else setMenuState(enterNode(menuState, node))
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
   })
 
   // Содержимое ТЕКУЩЕГО уровня меню (список кнопок или форма Ask AI) — как
@@ -257,16 +450,23 @@ export function MainWindow() {
           if (e.key === 'Enter') onPromptSubmit()
         }}
       />
-      <div className="action-grid action-grid-2">
+      {/* Возврат из формы больше не стоит рядом с Send: он переехал в полосу
+          над сеткой (.mw-trail ниже) вместе с возвратом из подменю — одно
+          место на весь возврат, при любой глубине и любом числе кнопок. */}
+      <div className="action-grid action-grid-1">
         <button className="primary" disabled={!hasText || !promptQuery.trim()} onClick={onPromptSubmit}>
           Send
         </button>
-        <button onClick={() => setMenuState(goBack(menuState))}>← Back</button>
       </div>
     </>
   ) : (
+    // Сетка пунктов — только пункты. Раньше первой ячейкой в ней стоял
+    // ← Back, из-за чего он читался третьим вариантом выбора наравне с
+    // языками, а его место зависело от числа пунктов: в подменю из двух он
+    // слева сверху, в подменю из трёх уехал бы в другую ячейку. Нумерация
+    // ⌘1…⌘9 при этом не менялась и не меняется — она всегда считалась по
+    // индексу в `level`, куда Back не входил (см. shortcutFor).
     <div className="action-grid action-grid-2">
-      {!isRoot(menuState) && <button onClick={() => setMenuState(goBack(menuState))}>← Back</button>}
       {level.map((node, i) => {
         // Бейдж рисуется из НАСТРОЙКИ (или из позиции в подменю), а не из
         // зашитой строки: поменял комбинацию в настройках — подпись на кнопке
@@ -350,6 +550,50 @@ export function MainWindow() {
     // краям и срезанные углы. Материал корпуса остаётся, обрамление панели
     // снимается.
     <div className="main-window chassis chassis-flush">
+      {/* Шапка источника — то же, что показывает оверлей над строкой статуса,
+          теми же классами (.source-app / .source-app-icon / .source-app-name)
+          и из того же разрешения имени и иконки по PID. Здесь она нужнее, чем
+          там: оверлей всплывает поверх приложения, которое пользователь и так
+          видит, а главное окно обычное и забирает фокус — «куда уйдёт Paste»
+          из него иначе ниоткуда не следует.
+
+          Кнопка Paste стоит в этой же строке не ради экономии места: она
+          отправляет текст именно в то приложение, которое здесь названо, и
+          читать это надо одной фразой, а не собирать из двух концов окна.
+          Меню действий она при этом не трогает вовсе — ни сетку, ни
+          анимацию переходов. */}
+      <div className="mw-source-row">
+        {sourceApp ? (
+          <span className="source-app">
+            {sourceApp.icon && <img className="source-app-icon" src={sourceApp.icon} alt="" />}
+            <span className="source-app-name">{sourceApp.name}</span>
+          </span>
+        ) : (
+          // sourceApp === undefined — ответа ещё нет, молчим; null — цели
+          // нет, и это надо сказать словами, иначе выключенная кнопка Paste
+          // выглядит поломкой. Оба случая (окно открыли без диктовки; то
+          // приложение закрылось) неотличимы для пользователя и лечатся
+          // одинаково, поэтому и текст один.
+          sourceApp === null && (
+            <span className="source-app source-app-missing">
+              No source app — dictate with the hotkey from the app you want the text in
+            </span>
+          )
+        )}
+        <button
+          className="primary mw-paste"
+          disabled={!canPaste}
+          onClick={onPaste}
+          title={
+            sourceApp
+              ? `Paste the text into ${sourceApp.name}`
+              : 'Slaive has nowhere to paste: no app is remembered from a dictation yet.'
+          }
+        >
+          Paste <span className="shortcut-badge">{formatShortcutBadge(mainPasteShortcut)}</span>
+        </button>
+      </div>
+
       <div className="mw-editor-row">
         <div className="transcript-field" ref={editorContainerRef} />
         <span className={`vim-mode vim-mode-${vimMode} mw-vim-mode`}>{vimMode.toUpperCase()}</span>
@@ -363,6 +607,32 @@ export function MainWindow() {
               <button onClick={() => openSettingsWindow()}>Open Settings</button>
               <button onClick={() => setActionError(null)}>Dismiss</button>
             </div>
+          </div>
+        )}
+
+        {/* Полоса возврата — ВНЕ .mw-panel-stack, поэтому она не участвует в
+            скольжении уровней: едет только содержимое сетки, а точка
+            возврата стоит на месте. Место у неё одно и то же при любом числе
+            пунктов и на любой глубине именно потому, что она собственная
+            строка .mw-menu, а не ячейка сетки действий, — число кнопок в
+            сетке на её положение больше не влияет никак.
+            Отвечает сразу за две вещи: возврат и ориентацию («← Translate» —
+            где ты находишься). В корне её нет — возвращаться некуда. В
+            pending/proposed она остаётся, но выключена: уровень, внутри
+            которого запущено действие, никуда не делся и его полезно видеть,
+            а уходить с панели Accept/Cancel вбок нельзя — та же причина, по
+            которой там выключены и сами действия. Заодно меню не дёргается
+            по высоте ровно в тот момент, когда играет анимация. */}
+        {!atRoot && (
+          <div className="mw-trail">
+            <button
+              type="button"
+              className="mw-back"
+              disabled={applyState.phase !== 'idle'}
+              onClick={onBack}
+            >
+              ← {currentLevelLabel(menuState) ?? 'Back'}
+            </button>
           </div>
         )}
 
@@ -411,6 +681,40 @@ export function MainWindow() {
           )}
         </div>
       </div>
+
+      {/* Тот же слой, что в оверлее, и та же разметка с теми же классами:
+          право одно (Accessibility), отказ один, и объяснение должно быть
+          одним — второй формулировки той же беды пользователю не нужно.
+          Не ловушка: Escape (см. обработчик клавиш выше) и кнопка Close
+          закрывают слой без последствий, текст уже лежит в буфере. */}
+      {showAccessModal && (
+        <div className="access-modal-backdrop" role="presentation">
+          <div
+            className="access-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Accessibility permission required"
+          >
+            <p className="access-modal-text">
+              Slaive can't send keystrokes to other apps yet, so Paste can't insert the text
+              automatically. The text is already on your clipboard — press Cmd+V to paste it
+              manually, or turn on Accessibility access below to make Paste work directly.
+            </p>
+            <div className="access-modal-actions">
+              <button
+                className="primary"
+                onClick={() => {
+                  openPrivacyPane('accessibility')
+                  setShowAccessModal(false)
+                }}
+              >
+                Open Settings
+              </button>
+              <button onClick={() => setShowAccessModal(false)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

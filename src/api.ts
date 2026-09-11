@@ -21,9 +21,24 @@ export type Settings = {
   askAiShortcut: string
   fixShortcut: string
   shortenShortcut: string
+  summarizeShortcut: string
+  /** Window-level shortcut for the main window's Paste button. Separate from
+   *  `pasteShortcut` only because of the key, not the action: the overlay's
+   *  default is a bare Enter, which its editor hands to a Vim action; the main
+   *  window has no such action, so a bare Enter there would mean what it means
+   *  in any editor — a new line. Default "Super+Enter" (Cmd+Return). */
+  mainPasteShortcut: string
   /** AI provider settings — model + base URL per provider. Keys live in the
    *  Keychain, never here (see `aiKeySet` below and `set_ai_key`). */
   ai: AiSettings
+  /** Target languages of the main window's Translate submenu, as plain names
+   *  separated by commas or newlines — "English, Spanish, Russian". Not ISO
+   *  codes: the model reads a name just as well, and a name list is editable in
+   *  one field. The submenu is built from this at render time (see
+   *  `buildActionTree`), so editing it changes the menu with no code change.
+   *  Empty means "not chosen" and falls back to the three defaults — an empty
+   *  list could only produce a dead submenu. */
+  translateLanguages: string
   /** Microphone gain multiplier applied to the PCM handed to VAD and whisper.
    *  Never applied to the level track — that one keeps showing the raw signal
    *  (see `apply_gain` in audio.rs). 1.0 = untouched, range 0.5–10. */
@@ -151,8 +166,8 @@ export const setAiKey = (provider: string, key: string) =>
  *  ИИ — только по явному нажатию. */
 export const testAiConnection = () => invoke<string>('test_ai_connection')
 
-/** Действие меню главного окна (Translate/Ask AI/Fix/Shorten) — единственная
- *  сетевая точка входа этого окна, вызывается ТОЛЬКО по явному нажатию
+/** Действие меню главного окна (Translate/Ask AI/Fix/Shorten/Summarize) —
+ *  единственная сетевая точка входа этого окна, вызывается ТОЛЬКО по явному нажатию
  *  действия (см. бриф главного окна: ни при открытии окна, ни при получении
  *  текста запросов быть не должно). system/user собираются во фронтенде
  *  (см. action-tree.ts) — сама команда лишь резолвит провайдера и шлёт запрос. */
@@ -180,3 +195,18 @@ export const openSettingsWindow = () => invoke<void>('open_settings_window')
  *  наверх, оверлей прячется. См. follow_to_main_window в Rust — окно-синглтон,
  *  второе не создаётся. */
 export const followToMainWindow = (text: string) => invoke<void>('follow_to_main_window', { text })
+
+/** Name and icon of the app the dictation came from — the same `prev_app_pid`
+ *  `paste_text` restores focus to, resolved the same way the overlay's header
+ *  is resolved (no AppleScript, no permission prompt).
+ *
+ *  `null` means there is no target at all: either the window was opened
+ *  without a preceding dictation, or that app has quit since. Both show the
+ *  same way — an explanatory header and a disabled Paste button. */
+export type SourceApp = { name: string; icon: string | null }
+export const getSourceApp = () => invoke<SourceApp | null>('get_source_app')
+
+/** Убирает главное окно и возвращает Dock-иконку (activation policy) в
+ *  Accessory — тот же путь, которым окно уходит по крестику (см.
+ *  hide_main_window в Rust). Зовётся после успешной вставки. */
+export const hideMainWindow = () => invoke<void>('hide_main_window')

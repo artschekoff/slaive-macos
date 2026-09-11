@@ -49,9 +49,18 @@ test('распределение настроек по разделам — ро
     'askAiShortcut',
     'fixShortcut',
     'shortenShortcut',
+    'summarizeShortcut',
+    'mainPasteShortcut',
   ])
-  // AI — обработка уже готового текста.
-  assert.deepEqual(byId('ai'), ['ai'])
+  // AI — обработка уже готового текста: провайдер и то, что у него просят.
+  assert.deepEqual(byId('ai'), ['ai', 'translateLanguages'])
+})
+
+// Языки перевода — цели ИИ-действия, а язык whisper — вход распознавания.
+// Двум разным «языкам» в одном разделе делать нечего: их бы путали.
+test('языки перевода лежат в AI, а язык распознавания — в Recognition', () => {
+  assert.equal(sectionOf('translateLanguages'), 'ai')
+  assert.equal(sectionOf('language'), 'recognition')
 })
 
 test('VAD разнесён намеренно: модель в Models, порог в Recognition', () => {
@@ -86,7 +95,10 @@ test('каждая хранимая настройка доступна хотя
     askAiShortcut: 'Super+KeyK',
     fixShortcut: 'Super+KeyF',
     shortenShortcut: 'Super+KeyS',
+    summarizeShortcut: 'Super+KeyU',
+    mainPasteShortcut: 'Super+Enter',
     ai: { provider: 'openai', providers: {} },
+    translateLanguages: 'English, Spanish, Russian',
     micGain: 1,
     vadThreshold: 0.5,
     inputDevice: null,
