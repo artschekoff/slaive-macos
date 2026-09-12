@@ -9,15 +9,30 @@ import {
 } from './settings-sections.ts'
 import type { Settings } from './api.ts'
 
-test('состав разделов — пять, в порядке брифа', () => {
+test('состав разделов — шесть, в порядке брифа', () => {
   assert.deepEqual(
     SECTIONS.map((s) => s.id),
-    ['audio', 'models', 'recognition', 'shortcuts', 'ai']
+    ['audio', 'models', 'recognition', 'shortcuts', 'ai', 'appearance']
   )
   assert.deepEqual(
     SECTIONS.map((s) => s.title),
-    ['Audio', 'Models', 'Recognition', 'Shortcuts', 'AI']
+    ['Audio', 'Models', 'Recognition', 'Shortcuts', 'AI', 'Appearance']
   )
+})
+
+// Прозрачность окон — не звук, не модели, не распознавание, не управление и
+// не ИИ. Втиснутая в любой из пяти прежних разделов, она оказалась бы там,
+// где её не станут искать; отсюда шестой.
+test('прозрачность окон живёт в Appearance, а не втиснута в соседей', () => {
+  assert.equal(sectionOf('windowOpacity'), 'appearance')
+  assert.deepEqual(SECTIONS.find((s) => s.id === 'appearance')!.settings, ['windowOpacity'])
+})
+
+// Appearance стоит последним и не подвинул стартовый раздел: окно настроек
+// открывают ради дела, а не ради того, чтобы посмотреть на него же.
+test('Appearance стоит последним', () => {
+  assert.equal(SECTIONS[SECTIONS.length - 1].id, 'appearance')
+  assert.notEqual(FIRST_SECTION, 'appearance')
 })
 
 test('при открытии окна показан первый раздел', () => {
@@ -102,6 +117,7 @@ test('каждая хранимая настройка доступна хотя
     micGain: 1,
     vadThreshold: 0.5,
     inputDevice: null,
+    windowOpacity: 0.9,
     dictionary: '',
   }
   const stored = Object.keys(sample).sort()

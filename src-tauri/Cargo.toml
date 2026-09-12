@@ -20,6 +20,19 @@ tokio = { version = "1", features = ["fs", "io-util", "sync", "macros"] }
 whisper-rs = { version = "0.16", features = ["metal"] }
 core-foundation = "0.10"
 core-graphics = "0.25"
+# Нужен ровно один вызов — `-[NSWindow setAlphaValue:]` (см. macos.rs).
+# Набор фич выписан поимённо и совпадает с тем, что уже включает tao (его
+# Cargo.toml, секция objc2-app-kit): при объединении фич cargo это ТЕ ЖЕ
+# модули, что и так компилируются для окон Tauri, — ни одной новой единицы
+# трансляции и ни одной новой загрузки из сети. `default-features = false`
+# здесь обязателен: дефолт objc2-app-kit — весь AppKit целиком (три сотни
+# классов), и он бы утроил время сборки ради одного сеттера.
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSResponder",
+    "NSWindow",
+] }
 # Дефолтная фича "v1" тянет за собой windows-native-keyring-store и
 # zbus-secret-service-keyring-store, но обе — под платформенным cfg (Windows
 # и не-macOS unix), поэтому на macOS они не попадают в граф сборки вообще;

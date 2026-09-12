@@ -144,6 +144,17 @@ pub struct Settings {
     /// (iPhone, USB-хабы); чинится переходом на CoreAudio device UID, если
     /// начнёт мешать.
     pub input_device: Option<String>,
+    /// Непрозрачность окон приложения, 0.5–1.0. Уходит в `NSWindow
+    /// alphaValue` (см. `macos::set_window_alpha`), то есть красит окно
+    /// целиком: содержимое, нативную полосу заголовка и тень. Одно значение
+    /// на все три окна — отдельных на окно намеренно нет, пользователь
+    /// выставляет «насколько сквозь Slaive видно то, что под ним», а не
+    /// настраивает окна по одному.
+    ///
+    /// Значение зажимается при чтении (`load`), а не только в интерфейсе:
+    /// файл правится руками, а 0.0 в нём означало бы невидимое приложение
+    /// без единого способа вернуть его обратно.
+    pub window_opacity: f32,
     /// Словарь терминов: слова, которые пользователь диктует по-английски
     /// посреди русской речи. Уходит в `initial_prompt` whisper (см.
     /// `whisper::initial_prompt`) — пустой словарь означает, что параметр не
@@ -227,6 +238,7 @@ impl Default for Settings {
             // «System default» — следовать за системой. Это же и поведение,
             // которое было до появления выбора устройства.
             input_device: None,
+            window_opacity: DEFAULT_WINDOW_OPACITY,
             dictionary: DEFAULT_DICTIONARY.to_string(),
         }
     }
@@ -239,14 +251,41 @@ pub const MAX_VAD_THRESHOLD: f32 = 0.9;
 /// Дефолт whisper.cpp — значение, с которым VAD работал до появления ползунка.
 pub const DEFAULT_VAD_THRESHOLD: f32 = 0.5;
 
+/// Границы непрозрачности окон. Нижняя — не вкусовая: ниже половины текст на
+/// пёстрых обоях перестаёт читаться, а окно становится неотличимо от того,
+/// что под ним. Верхняя — обычное непрозрачное окно, то есть «выключено».
+pub const MIN_WINDOW_OPACITY: f32 = 0.5;
+pub const MAX_WINDOW_OPACITY: f32 = 1.0;
+/// По умолчанию чуть прозрачно: ровно та просьба, с которой всё началось, —
+/// «видеть, поверх чего открыто окно», не теряя при этом сами окна.
+pub const DEFAULT_WINDOW_OPACITY: f32 = 0.9;
+
+/// Зажимает непрозрачность в рабочий диапазон. NaN не проходит ни одного
+/// сравнения, из-за чего `clamp` на нём паникует, — отдельная ветка до
+/// clamp, тот же приём, что в `audio::apply_gain` и
+/// `whisper::clamp_vad_threshold`.
+pub fn clamp_window_opacity(opacity: f32) -> f32 {
+    if opacity.is_nan() {
+        return DEFAULT_WINDOW_OPACITY;
+    }
+    opacity.clamp(MIN_WINDOW_OPACITY, MAX_WINDOW_OPACITY)
+}
+
 /// Битый или отсутствующий файл — не ошибка: возвращаем дефолты, чтобы
 /// приложение всегда стартовало.
 /// ponytail: без резервных копий и версионирования схемы, добавить когда полей станет много
 pub fn load(dir: &Path) -> Settings {
-    std::fs::read_to_string(dir.join(FILE_NAME))
+    let mut s: Settings = std::fs::read_to_string(dir.join(FILE_NAME))
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Единственное поле, которое зажимается прямо здесь, а не при применении,
+    // как усиление и порог VAD. Причина в цене ошибки: неверное усиление
+    // слышно и правится, а windowOpacity = 0 в файле, дописанный руками,
+    // делает невидимым и окно настроек тоже — исправить его стало бы
+    // неоткуда, кроме как тем же текстовым редактором.
+    s.window_opacity = clamp_window_opacity(s.window_opacity);
+    s
 }
 
 pub fn save(dir: &Path, s: &Settings) -> anyhow::Result<()> {
@@ -329,7 +368,41 @@ mod tests {
         assert_eq!(s.mic_gain, 1.0);
         assert_eq!(s.vad_threshold, 0.5);
         assert_eq!(s.input_device, None);
+        // Чуть прозрачно, но не настолько, чтобы это мешало: см. бриф.
+        assert_eq!(s.window_opacity, 0.9);
         assert_eq!(s.dictionary, DEFAULT_DICTIONARY);
+    }
+
+    /// Настройка визуальная, но значение в ней — не вкусовое: 0.0 в файле,
+    /// дописанный руками или оставшийся от сломанной записи, сделал бы
+    /// невидимым и окно настроек, то есть отобрал бы единственный способ
+    /// вернуть всё назад. Поэтому мусор зажимается при ЧТЕНИИ, а не при
+    /// применении — в отличие от усиления и порога VAD.
+    #[test]
+    fn window_opacity_is_clamped_when_read_from_a_junk_file() {
+        let dir = tmp();
+        let write_and_load = |raw: &str| {
+            std::fs::write(dir.join("settings.json"), raw).unwrap();
+            load(&dir).window_opacity
+        };
+        assert_eq!(write_and_load(r#"{"windowOpacity":0.0}"#), MIN_WINDOW_OPACITY);
+        assert_eq!(write_and_load(r#"{"windowOpacity":-5.0}"#), MIN_WINDOW_OPACITY);
+        assert_eq!(write_and_load(r#"{"windowOpacity":42.0}"#), MAX_WINDOW_OPACITY);
+        // Значение внутри диапазона проходит как есть — зажимаются края, а
+        // не выбор пользователя.
+        assert_eq!(write_and_load(r#"{"windowOpacity":0.7}"#), 0.7);
+        // Поля нет вовсе — настройки, сохранённые до появления ползунка.
+        assert_eq!(write_and_load(r#"{"hotkey":"Alt+Space"}"#), DEFAULT_WINDOW_OPACITY);
+    }
+
+    /// NaN не проходит ни одного сравнения, и `f32::clamp` на нём паникует —
+    /// то есть настройки с `NaN` в файле роняли бы приложение на старте,
+    /// а не просто выглядели бы странно.
+    #[test]
+    fn nan_opacity_falls_back_to_the_default_instead_of_panicking() {
+        assert_eq!(clamp_window_opacity(f32::NAN), DEFAULT_WINDOW_OPACITY);
+        assert_eq!(clamp_window_opacity(f32::INFINITY), MAX_WINDOW_OPACITY);
+        assert_eq!(clamp_window_opacity(f32::NEG_INFINITY), MIN_WINDOW_OPACITY);
     }
 
     #[test]
@@ -364,6 +437,7 @@ mod tests {
             mic_gain: 3.5,
             vad_threshold: 0.35,
             input_device: Some("Пётр's iPhone Microphone".into()),
+            window_opacity: 0.75,
             dictionary: "React\nTypeScript".into(),
         };
         save(&dir, &s).unwrap();

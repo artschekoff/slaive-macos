@@ -49,6 +49,15 @@ export type Settings = {
   /** Recording device name as `cpal` reports it. `null` = "System default",
    *  meaning follow the system — NOT "pin to whatever is default today". */
   inputDevice: string | null
+  /** How opaque the app's windows are, 0.5–1.0, default 0.9. Applied as the
+   *  native window alpha (`NSWindow.alphaValue`), so it covers the whole
+   *  window — web content, the native title bar and the shadow alike — not
+   *  just what CSS can reach. One value for all three windows.
+   *
+   *  The floor is 0.5 on purpose: below that, text stops reading against a
+   *  busy wallpaper and the window itself stops being distinguishable from
+   *  whatever is behind it. */
+  windowOpacity: number
   /** User's term list, fed to whisper's `initial_prompt` (see
    *  `whisper::initial_prompt`). Empty = the parameter isn't passed at all. */
   dictionary: string
@@ -69,6 +78,13 @@ export type SettingsResponse = Settings & {
 export const getSettings = () => invoke<SettingsResponse>('get_settings')
 export const saveSettings = (settings: Settings) => invoke<void>('save_settings', { settings })
 export const hideOverlay = () => invoke<void>('hide_overlay')
+
+/** Applies window opacity right away, without writing anything to disk — the
+ *  slider calls this on every move. A visual setting judged by eye can't ask
+ *  the user to save first and look second. Saving still happens the ordinary
+ *  way, through `saveSettings` with the rest of the form. */
+export const setWindowOpacity = (opacity: number) =>
+  invoke<void>('set_window_opacity', { opacity })
 
 /** `missing` — no file on disk; `downloaded` — file present but another model
  *  is in use; `active` — this is the one transcription runs on. Decided from

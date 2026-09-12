@@ -23,8 +23,15 @@ export type SettingKey =
   | 'mainPasteShortcut'
   | 'ai'
   | 'translateLanguages'
+  | 'windowOpacity'
 
-export type SectionId = 'audio' | 'models' | 'recognition' | 'shortcuts' | 'ai'
+export type SectionId =
+  | 'audio'
+  | 'models'
+  | 'recognition'
+  | 'shortcuts'
+  | 'ai'
+  | 'appearance'
 
 export type Section = {
   id: SectionId
@@ -49,7 +56,15 @@ export type Section = {
  *
  * Логика деления: Audio — что попадает в микрофон; Models — что скачивается и
  * занимает диск; Recognition — как звук превращается в текст; Shortcuts —
- * управление; AI — обработка уже готового текста.
+ * управление; AI — обработка уже готового текста; Appearance — как окна
+ * выглядят на экране.
+ *
+ * Appearance заведён под прозрачность окон, потому что втискивать её было
+ * некуда: она не про звук, не про модели, не про распознавание, не про
+ * управление и не про ИИ. Раздел из одной настройки выглядит худым, но
+ * альтернатива — настройка, лежащая не по адресу, и её не найдут глазами
+ * там, где будут искать. Стоит последним: это единственный раздел, в который
+ * не заходят по делу, а заходят посмотреть.
  *
  * VAD разнесён намеренно: скачивание его модели живёт рядом с остальными
  * загрузками, а порог — в распознавании, потому что крутят его из-за качества
@@ -98,6 +113,12 @@ export const SECTIONS: readonly Section[] = [
     title: 'AI',
     summary: 'What happens to the text after it is recognized.',
     settings: ['ai', 'translateLanguages'],
+  },
+  {
+    id: 'appearance',
+    title: 'Appearance',
+    summary: 'How the windows look on screen.',
+    settings: ['windowOpacity'],
   },
 ]
 

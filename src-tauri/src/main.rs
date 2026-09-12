@@ -47,11 +47,25 @@ fn main() {
             commands::hide_main_window,
             commands::get_source_app,
             commands::set_overlay_has_text,
+            commands::set_window_opacity,
         ])
         .setup(|app| {
             let dir = commands::data_dir(app.handle())?;
             let loaded = settings::load(&dir);
             app.manage(state::AppState::new(loaded));
+
+            // Прозрачность ставится один раз здесь, на созданных (пусть и
+            // скрытых) окнах: альфа живёт на самом NSWindow и переживает
+            // hide/show, поэтому повторять её при каждом показе панели не
+            // нужно — только при изменении настройки (см.
+            // commands::apply_window_opacity).
+            let opacity = app
+                .state::<state::AppState>()
+                .settings
+                .lock()
+                .unwrap()
+                .window_opacity;
+            commands::apply_window_opacity(app.handle(), opacity);
 
             let hotkey = app
                 .state::<state::AppState>()

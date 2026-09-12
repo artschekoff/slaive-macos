@@ -2,6 +2,11 @@ import { useCallback, useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { ShortcutCapture } from './ShortcutCapture'
 import {
+  findShortcutConflict,
+  conflictMessage,
+  type ShortcutField,
+} from './shortcut-conflicts'
+import {
   getSettings,
   saveSettings,
   listModels,
@@ -14,6 +19,7 @@ import {
   listAiProviders,
   setAiKey,
   testAiConnection,
+  setWindowOpacity,
   type SettingsResponse as S,
   type ModelCatalog,
   type ModelEntry,
@@ -38,6 +44,8 @@ const MIN_GAIN = 0.5
 const MAX_GAIN = 10
 const MIN_VAD_THRESHOLD = 0.1
 const MAX_VAD_THRESHOLD = 0.9
+const MIN_WINDOW_OPACITY = 0.5
+const MAX_WINDOW_OPACITY = 1
 
 // Подписи строк раздела Shortcuts для действий главного окна — один список,
 // а не пять скопированных блоков разметки: добавление действия это строка
@@ -63,6 +71,21 @@ export function Settings() {
   // settings-sections.ts): переключение мгновенное, без анимаций — это
   // настройки, а не мастер.
   const [section, setSection] = useState<SectionId>(FIRST_SECTION)
+
+  // Проверка на столкновение комбинаций. Раньше конфликт проваливался молча:
+  // назначил действию комбинацию глобального хоткея — и действие переставало
+  // срабатывать, потому что клавишу перехватывает система и до окна событие
+  // не доходит. ShortcutCapture при отказе validate показывает текст ошибки и
+  // НЕ применяет комбинацию, поэтому достаточно отклонить.
+  const conflictCheck = useCallback(
+    (field: ShortcutField, also?: (accel: string) => Promise<void>) =>
+      async (accel: string) => {
+        const takenBy = s ? findShortcutConflict(accel, field, s) : null
+        if (takenBy) throw new Error(conflictMessage(accel, takenBy))
+        if (also) await also(accel)
+      },
+    [s]
+  )
 
   // Пик последней записи ДО усиления — ориентир для ползунка ниже: без него
   // выбор значения это подбор вслепую. Приходит начальным значением из
@@ -518,7 +541,7 @@ export function Settings() {
             'A global hotkey needs at least one modifier (Ctrl, Alt, Shift, or Cmd) — otherwise ' +
             'it would capture this key in every app. Try a different combination.'
           }
-          validate={validateHotkey}
+          validate={conflictCheck('hotkey', validateHotkey)}
         />
       </label>
       {s.hotkeyOk === false && (
@@ -537,6 +560,7 @@ export function Settings() {
         <ShortcutCapture
           value={s.pasteShortcut}
           onChange={(accel) => patch({ pasteShortcut: accel })}
+          validate={conflictCheck('pasteShortcut')}
         />
       </label>
       <p className="hint">
@@ -549,6 +573,7 @@ export function Settings() {
         <ShortcutCapture
           value={s.copyShortcut}
           onChange={(accel) => patch({ copyShortcut: accel })}
+          validate={conflictCheck('copyShortcut')}
         />
       </label>
       <p className="hint">
@@ -578,6 +603,7 @@ export function Settings() {
           onChange={(accel) => patch({ mainPasteShortcut: accel })}
           requireModifier
           modifierError={ACTION_MODIFIER_ERROR}
+          validate={conflictCheck('mainPasteShortcut')}
         />
       </label>
       <p className="hint">
@@ -596,6 +622,7 @@ export function Settings() {
             // ограничен ActionShortcutKey, а значение — строкой, так что
             // приведение ничего не прячет.
             onChange={(accel) => patch({ [key]: accel } as Partial<S>)}
+            validate={conflictCheck(key)}
             requireModifier
             modifierError={ACTION_MODIFIER_ERROR}
           />
@@ -715,12 +742,53 @@ export function Settings() {
     </>
   )
 
+  const appearanceSection = (
+    <>
+      <label>
+        Window opacity
+        <div className="slider-row">
+          <input
+            type="range"
+            min={MIN_WINDOW_OPACITY}
+            max={MAX_WINDOW_OPACITY}
+            step={0.05}
+            value={s.windowOpacity}
+            onChange={(e) => {
+              const windowOpacity = Number(e.target.value)
+              patch({ windowOpacity })
+              // Применяем на лету, отдельной командой, ДО Save: настройку
+              // судят глазом, и цикл «выставил вслепую → сохранил →
+              // посмотрел» для неё бессмысленен. Отказ глотаем — он означает
+              // только «окно не отозвалось», и превращать его в красную
+              // строку посреди перетаскивания ползунка не за что;
+              // сохранение идёт обычным путём и об ошибке сообщит само.
+              setWindowOpacity(windowOpacity).catch(() => {})
+            }}
+          />
+          <span className="slider-value">{Math.round(s.windowOpacity * 100)}%</span>
+        </div>
+      </label>
+      <p className="hint">
+        How much of what's behind Slaive shows through. This is the window's own opacity, so it
+        covers everything — the panel, the main window, the settings window, title bars and all —
+        and it takes effect as you drag, before you save.
+      </p>
+      <p className="hint">
+        It stops at 50% on purpose. Below that, text stops reading against a busy wallpaper and the
+        level track in the panel stops telling a denied microphone apart from a quiet room — which
+        is the one thing that track is there for. At 100% the panel still shows a little of what's
+        behind it: its case is translucent by design, and that isn't this setting's doing.
+      </p>
+    </>
+  )
+
   const BODY: Record<SectionId, JSX.Element> = {
     audio: audioSection,
     models: modelsSection,
     recognition: recognitionSection,
     shortcuts: shortcutsSection,
     ai: aiSection,
+    appearance: appearanceSection,
   }
 
   const current = SECTIONS.find((sec) => sec.id === section) ?? SECTIONS[0]

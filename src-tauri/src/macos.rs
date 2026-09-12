@@ -5,6 +5,7 @@ use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
 use core_foundation::string::CFString;
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, KeyCode};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+use objc2_app_kit::NSWindow;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -107,6 +108,36 @@ extern "C" {
 /// поведением при любом другом ненулевом байте).
 pub fn has_accessibility_permission() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
+}
+
+/// Ставит окну альфу целиком — содержимое веб-вида, нативная полоса
+/// заголовка и тень разом. Один вызов `-[NSWindow setAlphaValue:]`, ничего
+/// платформенного за пределами этого модуля.
+///
+/// Почему альфа окна, а не прозрачность в CSS: CSS красит только содержимое
+/// веб-вида. У главного окна и настроек полоса заголовка рисуется системой,
+/// и при CSS-варианте получилось бы полупрозрачное окно с глухой шапкой.
+///
+/// Аргумент — тот самый `NSWindow *`, который отдаёт `ns_window()` у окна
+/// Tauri; модуль не знает, откуда указатель взялся, и не знает про Tauri.
+///
+/// # Safety
+///
+/// Вызывать только с главного потока и только с указателем на живой
+/// `NSWindow` (либо с нулевым — он отсеивается здесь же). AppKit требует
+/// главного потока для любой работы с окном; за это отвечает вызывающая
+/// сторона (`commands.rs` заворачивает вызов в `run_on_main_thread`).
+pub unsafe fn set_window_alpha(ns_window: *mut std::ffi::c_void, alpha: f64) {
+    if ns_window.is_null() {
+        return;
+    }
+    // SAFETY: непустой указатель на NSWindow, главный поток — оба условия
+    // на совести вызывающей стороны, см. раздел выше. Ссылка не переживает
+    // это выражение, и владение окном не забирается.
+    let window: &NSWindow = unsafe { &*ns_window.cast::<NSWindow>() };
+    // Сеттер принимает CGFloat; на 64-битной macOS это ровно f64, и
+    // приложение собирается только под неё (minimumSystemVersion 12.0).
+    window.setAlphaValue(alpha);
 }
 
 /// `kAXTrustedCheckOptionPrompt` — просит систему показать свой диалог и
