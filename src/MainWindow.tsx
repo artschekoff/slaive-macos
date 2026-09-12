@@ -33,9 +33,11 @@ import {
   copyText,
   pasteText,
   openPrivacyPane,
+  type HistoryEntry,
   type Settings,
   type SourceApp,
 } from './api'
+import { HistoryView } from './HistoryView'
 import {
   DEFAULT_ACTION_SHORTCUTS,
   nodeForKey,
@@ -97,6 +99,30 @@ export function MainWindow() {
   // показывается он СРАЗУ по нажатию Paste, а не после заведомо провальной
   // попытки (см. onPaste ниже).
   const [showAccessModal, setShowAccessModal] = useState(false)
+
+  // История расшифровок занимает место дерева действий в нижней области окна
+  // (см. JSX ниже). Верхняя область с текстом при этом остаётся на экране:
+  // это неподвижная часть интерфейса (бриф главного окна), и видеть, что
+  // именно будет заменено, полезнее, чем на секунду её прятать.
+  const [showHistory, setShowHistory] = useState(false)
+  // Что лежало в редакторе ДО того, как туда положили запись из истории.
+  // Замена текста задумана (история — способ вернуться к прежней расшифровке,
+  // а не дописать к текущей), но человек мог полчаса править надиктованное
+  // руками, и «задумано» не оправдывает молчаливую потерю этой работы.
+  //
+  // Спрашивать подтверждение перед каждой заменой нельзя: текст в редакторе
+  // есть почти всегда (в это окно иначе и не попадают), диалог выскакивал бы
+  // на каждое нажатие плитки и через день перестал бы читаться. Поэтому
+  // замена происходит сразу, а рядом остаётся строка с кнопкой Undo, которая
+  // кладёт прежний текст обратно ПОБАЙТОВО — тот же приём и та же гарантия,
+  // что у Cancel в цикле действий ИИ (см. `original` в apply-state.ts).
+  //
+  // Не полагаемся на undo самого редактора (vim `u` замену тоже откатывает,
+  // история изменений у CodeMirror общая на весь документ): про него надо
+  // знать, он требует normal-режима и фокуса в поле, и проверить его можно
+  // только руками в живом приложении. Собственный снимок работает по
+  // построению.
+  const [replacedText, setReplacedText] = useState<string | null>(null)
 
   // Хоткеи действий — ОКОННЫЕ, не глобальные (см. action-shortcuts.ts):
   // обычный keydown ниже, никакого tauri-plugin-global-shortcut. В состоянии,
@@ -191,6 +217,11 @@ export function MainWindow() {
       setApplyState(idleApplyState())
       setActionError(null)
       setPromptQuery('')
+      // Новый текст — новый цикл: история закрывается, а предложение вернуть
+      // прежний текст теряет смысл (прежний текст только что заменён не
+      // историей, а новой диктовкой).
+      setShowHistory(false)
+      setReplacedText(null)
       // Текст новый — возможно, и приложение, из которого его надиктовали,
       // тоже другое. Шапку и доступность Paste перечитываем на каждый Follow,
       // а не один раз на монтировании.
@@ -226,6 +257,10 @@ export function MainWindow() {
     const original = currentText()
     setApplyState(startRequest(original, id))
     setActionError(null)
+    // С текстом начали работать — предложение вернуть то, что было до
+    // истории, дальше только мешало бы: откатывать теперь есть куда и без
+    // него (Cancel), а строка внизу относилась бы к позапрошлому состоянию.
+    setReplacedText(null)
     runAiAction(system, user)
       .then((result) => {
         setApplyState((prev) => receiveResult(prev, id, result))
@@ -266,6 +301,30 @@ export function MainWindow() {
     setApplyState(cancelApply(applyState))
     setMenuState(rootMenuState(actionTree))
     setPromptQuery('')
+  }
+
+  // Нажатие на плитку истории: ПОЛНЫЙ текст записи уезжает в редактор, вид
+  // возвращается к дереву действий — там, где с текстом и работают.
+  // В корень, а не на прежний уровень: текст другой, значит цикл другой, —
+  // ровно то же решение, что принимает follow:text выше.
+  const onPickHistory = (entry: HistoryEntry) => {
+    const view = viewRef.current
+    const previous = view?.state.doc.toString() ?? ''
+    if (view) resetEditorContent(view, entry.text)
+    setShowHistory(false)
+    setMenuState(rootMenuState(actionTree))
+    setPromptQuery('')
+    setActionError(null)
+    // Строка с Undo — только если было что терять. Замена пустого редактора
+    // ничего не стоила, и сообщать об этом не о чем.
+    setReplacedText(previous.trim() ? previous : null)
+  }
+
+  const onUndoReplace = () => {
+    if (replacedText === null) return
+    const view = viewRef.current
+    if (view) resetEditorContent(view, replacedText)
+    setReplacedText(null)
   }
 
   // Возврат на уровень выше — одна функция на оба входа: полосу ← над сеткой
@@ -395,6 +454,13 @@ export function MainWindow() {
           return
         }
         if (editorFocused && vimMode === 'insert') return // выход в normal — не наше дело
+        // История — такой же «слой поверх окна», как уровень меню: Escape
+        // выводит из неё туда же, куда полоса ← над сеткой.
+        if (showHistory) {
+          e.preventDefault()
+          setShowHistory(false)
+          return
+        }
         // Возврат на уровень выше — то же, что делает полоса ← над сеткой.
         // В корне не делаем ничего: закрывать окно по Escape никто не просил,
         // а «ничего» здесь честнее, чем придуманное действие.
@@ -415,6 +481,12 @@ export function MainWindow() {
         onPaste()
         return
       }
+
+      // Пока открыта история, сетки действий на экране нет — срабатывать их
+      // хоткеям не по чему. Paste выше остаётся: текст в редакторе никуда не
+      // делся, и отправить его можно с любого вида. Тот же довод, что у
+      // условия «какие кнопки сейчас нарисованы, решает level».
+      if (showHistory) return
 
       if (!hasText || applyState.phase !== 'idle' || showingPrompt) return
       const node = nodeForKey(e, level, atRoot, actionShortcuts)
@@ -617,29 +689,79 @@ export function MainWindow() {
             строка .mw-menu, а не ячейка сетки действий, — число кнопок в
             сетке на её положение больше не влияет никак.
             Отвечает сразу за две вещи: возврат и ориентацию («← Translate» —
-            где ты находишься). В корне её нет — возвращаться некуда. В
+            где ты находишься). В корне возврата в ней нет — возвращаться
+            некуда, — но сама полоса есть: с появлением истории у неё
+            появился второй, постоянный житель (см. ниже). В
             pending/proposed она остаётся, но выключена: уровень, внутри
             которого запущено действие, никуда не делся и его полезно видеть,
             а уходить с панели Accept/Cancel вбок нельзя — та же причина, по
             которой там выключены и сами действия. Заодно меню не дёргается
             по высоте ровно в тот момент, когда играет анимация. */}
-        {!atRoot && (
-          <div className="mw-trail">
-            <button
-              type="button"
-              className="mw-back"
-              disabled={applyState.phase !== 'idle'}
-              onClick={onBack}
-            >
-              ← {currentLevelLabel(menuState) ?? 'Back'}
-            </button>
+        {/* Строка с предложением вернуть заменённый текст. Живёт над полосой
+            возврата, а не под сеткой: она про ТЕКСТ, который лежит выше, и
+            читается по дороге от него к действиям. Оформлена нейтрально, а не
+            как ошибка (.mw-error) — ничего не сломалось, это уведомление. */}
+        {replacedText !== null && (
+          <div className="mw-notice">
+            <span>Loaded from history. The text that was here has been replaced.</span>
+            <div className="mw-error-actions">
+              <button onClick={onUndoReplace}>Undo</button>
+              <button onClick={() => setReplacedText(null)}>Dismiss</button>
+            </div>
           </div>
         )}
+
+        {/* Полоса теперь есть ВСЕГДА, а не только в подменю: справа в ней
+            стоит вход в историю, и он должен быть на одном месте при любой
+            глубине меню — как и сам возврат. Побочно исчез скачок разметки
+            на 20px при спуске в подменю.
+            Вход в историю оформлен той же приглушённой кнопкой, что и
+            возврат: это навигация по окну, а не действие над текстом, и
+            стоять по весу в одном ряду с Translate/Fix он не должен.
+            Выключается там же, где выключается возврат (идёт запрос к ИИ):
+            уходить с панели Accept/Cancel некуда — ни вбок, ни в историю. */}
+        <div className="mw-trail">
+          {showHistory ? (
+            <button type="button" className="mw-back" onClick={() => setShowHistory(false)}>
+              ← Actions
+            </button>
+          ) : (
+            !atRoot && (
+              <button
+                type="button"
+                className="mw-back"
+                disabled={applyState.phase !== 'idle'}
+                onClick={onBack}
+              >
+                ← {currentLevelLabel(menuState) ?? 'Back'}
+              </button>
+            )
+          )}
+          {!showHistory && (
+            <button
+              type="button"
+              className="mw-back mw-history-open"
+              disabled={applyState.phase !== 'idle'}
+              onClick={() => setShowHistory(true)}
+              title="Earlier transcripts, stored on this Mac"
+            >
+              History
+            </button>
+          )}
+        </div>
+
+        {/* История занимает место дерева действий целиком: это не ещё один
+            уровень меню (в неё не «проваливаются» из Translate и из неё не
+            возвращаются на уровень выше), а другой вид того же окна. Поэтому
+            она вне .mw-panel-stack и не участвует в боковых переходах —
+            анимации уровней её не видят, а она не путается в их учёте
+            уходящих панелей. */}
+        {showHistory && <HistoryView onPick={onPickHistory} />}
 
         {/* .mw-panel-stack накладывает уходящую и текущую панели в одну
             grid-ячейку (см. styles.css) — обе видимы одновременно ровно то
             время, что требует бриф, без сдвига разметки под ними. */}
-        <div className="mw-panel-stack">
+        <div className="mw-panel-stack" hidden={showHistory}>
           {outgoingPanel && (
             <div key={outgoingPanel.key} className={`mw-panel mw-exit-${outgoingPanel.direction}`}>
               {outgoingPanel.node}
@@ -688,19 +810,19 @@ export function MainWindow() {
           Не ловушка: Escape (см. обработчик клавиш выше) и кнопка Close
           закрывают слой без последствий, текст уже лежит в буфере. */}
       {showAccessModal && (
-        <div className="access-modal-backdrop" role="presentation">
+        <div className="modal-backdrop" role="presentation">
           <div
-            className="access-modal"
+            className="modal"
             role="dialog"
             aria-modal="true"
             aria-label="Accessibility permission required"
           >
-            <p className="access-modal-text">
+            <p className="modal-text">
               Slaive can't send keystrokes to other apps yet, so Paste can't insert the text
               automatically. The text is already on your clipboard — press Cmd+V to paste it
               manually, or turn on Accessibility access below to make Paste work directly.
             </p>
-            <div className="access-modal-actions">
+            <div className="modal-actions">
               <button
                 className="primary"
                 onClick={() => {

@@ -177,6 +177,18 @@ pub struct Settings {
 /// потолок 224 токена. Причём лишнее отбрасывается с НАЧАЛА списка и молча:
 /// длинный словарь не расширит охват, а тихо потеряет первую половину.
 /// Поэтому здесь плотный список коротких терминов, а не связный текст.
+/// Сколько бюджета занято прямо сейчас, пользователь теперь видит в поле
+/// настроек (src/prompt-budget.ts) — до этого узнать было неоткуда.
+///
+/// ПО ТЕРМИНУ В СТРОКЕ, а не через запятую, как было раньше. Разницы для
+/// whisper нет никакой: `initial_prompt` разбивает и по переносам, и по
+/// запятым, и в обоих случаях склеивает обратно через ", ". Форма выбрана
+/// по тому, как список правят: поле словаря в настройках — редактор с
+/// Vim-биндингами (src/DictionaryField.tsx), а там строка это единица
+/// работы. `dd` выбрасывает термин, `j`/`k` ходят по терминам, `/docker`
+/// ищет термин. На одной длинной строке через запятую то же `dd` стёрло бы
+/// словарь целиком. Значения, уже сохранённые пользователями через запятую,
+/// при этом продолжают работать как работали — сид не мигрирует чужой текст.
 /// Дефолтные языки перевода. Те же три, что видит пользователь в поле
 /// настроек, — и та же строка, из которой строится подменю Translate, когда
 /// поле пусто (см. `translate_languages`). Дублируется на фронтенде
@@ -184,7 +196,77 @@ pub struct Settings {
 /// дефолты: там это заглушка до первого ответа get_settings.
 pub const DEFAULT_TRANSLATE_LANGUAGES: &str = "English, Spanish, Russian";
 
-pub const DEFAULT_DICTIONARY: &str = "commit, merge, rebase, pull request, branch, revert, deploy, rollback, backend, frontend, endpoint, payload, middleware, migration, schema, query, cache, webhook, latency, throughput, API, REST, GraphQL, gRPC, JWT, OAuth, CORS, component, props, hook, render, bundle, hydration, TypeScript, React, Kubernetes, Docker, container, pod, namespace, ingress, Helm, Terraform, pipeline, artifact, rollout, canary, load balancer, autoscaling, Prometheus, Grafana, Google Cloud, BigQuery, Cloud Run, Pub/Sub, Firestore, GKE, IAM, Cloud Storage, Secret Manager, Cloud Build, AWS, EC2, S3, Lambda, DynamoDB, RDS, ECS, EKS, Fargate, CloudWatch";
+pub const DEFAULT_DICTIONARY: &str = "commit\n\
+merge\n\
+rebase\n\
+pull request\n\
+branch\n\
+revert\n\
+deploy\n\
+rollback\n\
+backend\n\
+frontend\n\
+endpoint\n\
+payload\n\
+middleware\n\
+migration\n\
+schema\n\
+query\n\
+cache\n\
+webhook\n\
+latency\n\
+throughput\n\
+API\n\
+REST\n\
+GraphQL\n\
+gRPC\n\
+JWT\n\
+OAuth\n\
+CORS\n\
+component\n\
+props\n\
+hook\n\
+render\n\
+bundle\n\
+hydration\n\
+TypeScript\n\
+React\n\
+Kubernetes\n\
+Docker\n\
+container\n\
+pod\n\
+namespace\n\
+ingress\n\
+Helm\n\
+Terraform\n\
+pipeline\n\
+artifact\n\
+rollout\n\
+canary\n\
+load balancer\n\
+autoscaling\n\
+Prometheus\n\
+Grafana\n\
+Google Cloud\n\
+BigQuery\n\
+Cloud Run\n\
+Pub/Sub\n\
+Firestore\n\
+GKE\n\
+IAM\n\
+Cloud Storage\n\
+Secret Manager\n\
+Cloud Build\n\
+AWS\n\
+EC2\n\
+S3\n\
+Lambda\n\
+DynamoDB\n\
+RDS\n\
+ECS\n\
+EKS\n\
+Fargate\n\
+CloudWatch";
 
 impl Default for Settings {
     fn default() -> Self {
@@ -307,10 +389,37 @@ mod tests {
     /// Токенизатор здесь не доступен, поэтому считаем консервативно по
     /// символам: английский текст у BPE whisper — порядка 4 символов на
     /// токен, берём 3.5 с запасом в худшую сторону.
+    ///
+    /// Меряем СОБРАННУЮ подсказку (`initial_prompt`), а не длину константы.
+    /// Раньше это было одно и то же — сид был записан ровно через ", ", как
+    /// его и склеивает `initial_prompt`. С переходом сида на «термин в
+    /// строке» длины разошлись: перенос строки — один символ, ", " — два,
+    /// и на 71 термине разница около 20 токенов, которых тест бы не увидел.
+    /// До whisper доезжает склейка, её и проверяем; заодно тест перестал
+    /// зависеть от того, как сид отформатирован.
+    /// Сид записан по термину в строке — это не оформление, а выбранная
+    /// единица правки в Vim-редакторе поля (см. комментарий у
+    /// DEFAULT_DICTIONARY). Проверяем именно то, что от формы зависит: ни
+    /// одной пустой строки и ни одной строки, где терминов на самом деле
+    /// несколько, — иначе `dd` в поле выбрасывал бы не один термин, а сколько
+    /// придётся.
+    #[test]
+    fn default_dictionary_is_one_term_per_line() {
+        for line in DEFAULT_DICTIONARY.lines() {
+            assert!(!line.trim().is_empty(), "в сиде словаря пустая строка");
+            assert!(
+                !line.contains(','),
+                "строка сида «{line}» содержит больше одного термина"
+            );
+        }
+    }
+
     #[test]
     fn default_dictionary_fits_whisper_prompt_budget() {
         const MAX_PROMPT_TOKENS: usize = 224;
-        let approx_tokens = (DEFAULT_DICTIONARY.len() as f32 / 3.5).ceil() as usize;
+        let prompt = crate::whisper::initial_prompt(DEFAULT_DICTIONARY)
+            .expect("сид словаря не пуст, подсказка обязана собраться");
+        let approx_tokens = (prompt.len() as f32 / 3.5).ceil() as usize;
         assert!(
             approx_tokens <= MAX_PROMPT_TOKENS,
             "сид словаря ~{approx_tokens} токенов при потолке {MAX_PROMPT_TOKENS}; \

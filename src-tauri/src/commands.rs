@@ -1,5 +1,6 @@
 use crate::ai::{self, AiRequest, ResolvedProvider};
 use crate::audio::{self, Recorder};
+use crate::history;
 use crate::macos;
 use crate::model::{self, ModelEntry};
 use crate::settings::{self, Settings};
@@ -840,6 +841,11 @@ pub struct RecStartPayload {
 pub struct TranscriptPayload {
     pub text: String,
     pub append: bool,
+    /// Длительность записи в секундах — для журнала расшифровок (см.
+    /// `add_history_entry`). При дозаписи это длительность ВСЕГО накопленного
+    /// звука, а не последнего фрагмента: в историю уйдёт накопленный текст, и
+    /// число рядом с ним должно относиться к тому же.
+    pub duration_secs: f32,
 }
 
 /// Общая логика остановки записи и запуска расшифровки в фоновом потоке.
@@ -933,12 +939,19 @@ pub fn end_recording(app: &AppHandle) {
         // бы накопленным, а `Play` играл бы только последний кусок.
         // Сохраняем сырое, до усиления: это запись как она есть, а усиление —
         // параметр распознавания, а не свойство записи.
+        // Длительность накопленной записи в секундах — единственное, что
+        // отсюда доезжает до журнала расшифровок вместе с текстом (см.
+        // `add_history_entry`). Считается по СКЛЕЕННОМУ PCM, поэтому при
+        // дозаписи относится ко всему, что лежит в редакторе, а не к
+        // последнему фрагменту.
+        let duration_secs;
         {
             let mut slot = state.last_recording.lock().unwrap();
             let combined = match slot.as_ref() {
                 Some(prev) if append => audio::concat_pcm(prev, &pcm),
                 _ => pcm.clone(),
             };
+            duration_secs = combined.len() as f32 / audio::WHISPER_SAMPLE_RATE as f32;
             *slot = Some(combined);
         }
 
@@ -1007,7 +1020,15 @@ pub fn end_recording(app: &AppHandle) {
                 // appendTranscript в transcript-editor.ts). Накопленный текст
                 // на бэкенде не хранится и не пересобирается — иначе он
                 // затёр бы правки, которые пользователь уже внёс руками.
-                let _ = app.emit_to("overlay", "transcript", TranscriptPayload { text, append });
+                let _ = app.emit_to(
+                    "overlay",
+                    "transcript",
+                    TranscriptPayload {
+                        text,
+                        append,
+                        duration_secs,
+                    },
+                );
                 focus_overlay(&app);
             }
             Err(e) => {
@@ -1444,6 +1465,70 @@ pub fn follow_to_main_window(app: AppHandle, text: String) -> Result<(), String>
 #[tauri::command]
 pub fn get_last_recording(app: AppHandle) -> Option<Vec<f32>> {
     app.state::<AppState>().last_recording.lock().unwrap().clone()
+}
+
+/// Журнал расшифровок, от НОВЫХ к старым — в этом порядке он и показывается
+/// в сетке плиток. В файле записи лежат наоборот (дозапись в конец), разворот
+/// делается здесь, чтобы интерфейсу не приходилось помнить, какой порядок у
+/// файла, а файлу — подстраиваться под интерфейс.
+#[tauri::command]
+pub fn list_history(app: AppHandle) -> Result<Vec<history::Entry>, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    let mut entries = history::load(&dir).map_err(|e| e.to_string())?;
+    // Только числа: сколько записей и сколько весит файл. Содержимое
+    // расшифровок не логируется ни здесь, ни где-либо ещё.
+    eprintln!(
+        "история: записей {}, файл {} байт",
+        entries.len(),
+        history::file_bytes(&dir)
+    );
+    entries.reverse();
+    Ok(entries)
+}
+
+/// Добавляет расшифровку в журнал.
+///
+/// Зовёт ПАНЕЛЬ, а не `end_recording`, и это не случайность: в историю должен
+/// попасть ИТОГОВЫЙ текст, а при дозаписи бэкенд его не знает — он шлёт
+/// только новый фрагмент, а склеивает его с уже набранным документ редактора
+/// (см. `appendTranscript` в src/transcript-editor.ts), потому что иначе
+/// затёрлись бы правки, сделанные руками. Итоговый текст существует ровно в
+/// одном месте — в редакторе, — оттуда он сюда и приходит.
+///
+/// Неудачные и слишком короткие записи сюда не доходят по построению: панель
+/// зовёт эту команду только по событию `transcript`, а его не бывает без
+/// успешной расшифровки.
+#[tauri::command]
+pub fn add_history_entry(app: AppHandle, text: String, duration_secs: f32) -> Result<(), String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    let entry = history::append(&dir, &text, duration_secs).map_err(|e| e.to_string())?;
+    // id и длительность — числа, их можно; текста в логе нет.
+    eprintln!(
+        "история: добавлена запись {}, длительность {:.1} с, файл {} байт",
+        entry.id,
+        entry.duration_secs,
+        history::file_bytes(&dir)
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_history_entry(app: AppHandle, id: u64) -> Result<(), String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    history::delete(&dir, id).map_err(|e| e.to_string())?;
+    eprintln!("история: удалена запись {id}");
+    Ok(())
+}
+
+/// Очистка всей истории. Подтверждение спрашивает интерфейс — здесь только
+/// исполнение: вернуть стёртое неоткуда, это не модель, которая скачивается
+/// заново.
+#[tauri::command]
+pub fn clear_history(app: AppHandle) -> Result<(), String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    history::clear(&dir).map_err(|e| e.to_string())?;
+    eprintln!("история: очищена");
+    Ok(())
 }
 
 #[cfg(test)]

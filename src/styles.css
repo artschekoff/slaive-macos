@@ -101,6 +101,44 @@ body {
   text-shadow: 0 -1px 0 rgba(0, 0, 0, 0.35);
 }
 
+/* Индикатор загрузки на пункте Models. Пункт остаётся одной строкой, пока
+   ничего не качается, и разворачивается в три яруса на время загрузки:
+   название с процентом, полоса, скорость. Столбец при этом не прыгает по
+   ширине — растёт только высота одного пункта. */
+.settings-nav-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+/* Процент справа от названия — моноширинный, иначе пункт подрагивал бы на
+   каждом изменении: цифры разной ширины двигают правый край. */
+.nav-download-percent {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+.nav-download {
+  display: block;
+  margin-top: 4px;
+}
+
+.settings .nav-download progress {
+  display: block;
+  width: 100%;
+  height: 3px;
+}
+
+.nav-download-speed {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+
 .settings-pane {
   display: flex;
   flex-direction: column;
@@ -146,12 +184,26 @@ body {
 
 .settings h1 { font-size: 18px; font-weight: 600; }
 
-.settings label {
+/* .field — то же самое, что label, для поля, которое не является элементом
+   формы: словарь теперь редактор CodeMirror (contenteditable), а <label>
+   вокруг него не имеет смысла — ему нечего активировать по клику. Одно
+   правило на оба случая, чтобы подпись поля выглядела одинаково независимо
+   от того, чем поле оказалось внутри. */
+.settings label,
+.settings .field {
   display: flex;
   flex-direction: column;
   gap: 6px;
   font-size: 13px;
   color: #a1a1a6;
+}
+
+/* Строка подписи словаря: название слева, бейдж режима Vim справа. */
+.dictionary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 /* Поля ввода — тот же светлый материал, что у поля транскрипта в панели
@@ -173,15 +225,55 @@ body {
 .settings input::placeholder,
 .settings textarea::placeholder { color: #8e8e93; }
 
-/* Словарь терминов — многострочное поле, единственное в настройках.
-   Моноширинный: это список слов, а не проза, и вертикальное выравнивание
-   помогает увидеть опечатку. Тянется только по вертикали — по горизонтали
-   ему расти некуда, панель фиксированной ширины. */
+/* Многострочное поле настроек (теперь это только список языков перевода —
+   словарь терминов стал редактором, см. .dictionary-editor ниже; класс
+   оставлен прежним, потому что вид поля тот же). Моноширинный: это список
+   слов, а не проза, и вертикальное выравнивание помогает увидеть опечатку.
+   Тянется только по вертикали — по горизонтали ему расти некуда, панель
+   фиксированной ширины. */
 .settings textarea.dictionary {
   resize: vertical;
   min-height: 84px;
   line-height: 1.45;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Поле словаря — тот же .transcript-field, что в панели и главном окне (см.
+   его правила ниже по файлу), здесь только высота.
+
+   Фиксированные 220px ≈ 10 строк (10 × 20.3px при line-height 1.45 и
+   font-size 14px ≈ 203px + 16px внутренних отступов .cm-content), вдвое
+   больше прежних rows={5}: словарь из десятков терминов правят построчно, и
+   чем больше видно соседних строк, тем меньше слепой прокрутки. Не больше —
+   раздел Recognition должен оставаться разделом, а не окном редактора.
+   Дальше поле не растёт: прокрутка внутри (.cm-scroller), и в ней помогает
+   сам Vim (gg/G, / для поиска).
+
+   resize: vertical, который был у textarea, НЕ переносится: у <textarea>
+   ручку изменения размера рисует сам браузер, а здесь низ поля занимает
+   .cm-scroller редактора, и ручка оказалась бы под ним. Нарисованная, но не
+   хватаемая ручка хуже её отсутствия.
+   ponytail: высота не настраивается, усложнять — если словари начнут
+   заводить такого размера, что десяти строк не хватает. */
+.dictionary-editor {
+  height: 220px;
+}
+
+/* Моноширинный шрифт — как у прежней textarea и по той же причине: это
+   список терминов, а не проза. Перебивает font-family: inherit, который
+   .transcript-field .cm-scroller берёт у окна (там это нужно транскрипту —
+   он-то как раз проза). */
+.dictionary-editor .cm-scroller {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Счётчик бюджета подсказки. Обычная подсказка, пока места хватает; при
+   переполнении к нему добавляется .err (красный текст, см. ниже) — тот же
+   способ показать проблему, что у остальных ошибок в настройках. Цифры
+   набраны табличными цифрами, чтобы счётчик не дёргался по ширине на каждый
+   введённый символ. */
+.dictionary-budget {
+  font-variant-numeric: tabular-nums;
 }
 
 /* Выпадающий список с кнопкой справа (устройство записи + Refresh). */
@@ -260,6 +352,15 @@ body {
 .model-actions button { padding: 5px 10px; font-size: 12px; }
 
 .settings progress { width: 100%; height: 6px; }
+
+/* Полоса со строкой под ней: сколько из скольки и с какой скоростью. Строка
+   моноширинная по цифрам — она меняется несколько раз в секунду, и без этого
+   «812 MB of 1.6 GB · 12.4 MB/s» дёргалось бы на каждом обновлении. */
+.download-progress { margin-top: 6px; }
+.download-progress .hint {
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
 
 /* Занято на диске — итог раздела, поэтому отделён линией сверху: это не ещё
    одна подсказка к последней строке списка. */
@@ -423,7 +524,7 @@ button.primary {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  /* relative — модальный слой права (.access-modal-backdrop) и кнопка
+  /* relative — модальный слой права (.modal-backdrop) и кнопка
      .overlay-close позиционируются absolute внутри этого элемента и должны
      перекрывать/лежать именно на панели, а не на всём webview. */
   position: relative;
@@ -437,7 +538,7 @@ button.primary {
    компактный квадрат-в-круге). Escape продолжает закрывать панель тем же
    путём, что и раньше (см. глобальный обработчик клавиш в Overlay.tsx) —
    эта кнопка не заменяет и не дублирует ту логику, только даёт кликабельную
-   альтернативу. z-index ниже модального слоя (10, см. .access-modal-backdrop
+   альтернативу. z-index ниже модального слоя (10, см. .modal-backdrop
    ниже) — пока открыт слой "нет права на вставку", он должен закрывать
    собой в том числе эту кнопку, у слоя есть своя кнопка Close. */
 .overlay .overlay-close {
@@ -1062,13 +1163,20 @@ button.primary {
   box-shadow: none;
 }
 
-/* ===== Модальный слой "нет права на вставку" (Overlay.tsx) =====
-   Перекрывает всю панель — затемнение с размытием поверх корпуса, по
-   центру короткое объяснение и кнопки. Оформление наследует панель: та же
+/* ===== Модальный слой =====
+   Перекрывает окно целиком — затемнение с размытием поверх корпуса, по
+   центру короткое объяснение и кнопки. Оформление наследует корпус: та же
    типографика и те же объёмные кнопки (.chassis button), не системный
-   диалог. .overlay уже получил position: relative выше — слой
-   позиционируется absolute относительно него, а не всего окна. */
-.access-modal-backdrop {
+   диалог. .overlay и .main-window получили position: relative выше — слой
+   позиционируется absolute относительно окна-хозяина, а не всего вьюпорта.
+
+   Классы назывались .access-modal* — по первому и тогда единственному
+   жильцу, слою "нет права на вставку". Теперь тем же слоем спрашивается
+   подтверждение очистки истории (HistoryView.tsx), и держать под именем
+   про Accessibility второй, совсем не про права, диалог было бы враньём —
+   как и копировать те же двадцать строк под вторым именем. Материал один,
+   имя нейтральное, у каждого жильца свой только текст. */
+.modal-backdrop {
   position: absolute;
   inset: 0;
   background: rgba(10, 10, 12, 0.55);
@@ -1081,7 +1189,7 @@ button.primary {
   z-index: 10;
 }
 
-.access-modal {
+.modal {
   max-width: 340px;
   background: linear-gradient(180deg, #3a3a3e 0%, #232326 100%);
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -1095,14 +1203,14 @@ button.primary {
   gap: 12px;
 }
 
-.access-modal-text {
+.modal-text {
   font-size: 13px;
   line-height: 1.5;
   color: #f2f2f7;
   text-shadow: 0 1px 0 rgba(0, 0, 0, 0.3);
 }
 
-.access-modal-actions {
+.modal-actions {
   display: flex;
   gap: 8px;
 }
@@ -1121,8 +1229,8 @@ button.primary {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  /* Для .access-modal-backdrop (position: absolute; inset: 0) — тот же
-     приём, что у .overlay: слой права накрывает окно, а не вьюпорт. */
+  /* Для .modal-backdrop (position: absolute; inset: 0) — тот же
+     приём, что у .overlay: модальный слой накрывает окно, а не вьюпорт. */
   position: relative;
   /* Страховка от обрезки меню нижним краем окна. Пять корневых действий (2+2+1
      ряда) в это окно влезают с запасом даже на минимальных 400px высоты:
@@ -1139,10 +1247,10 @@ button.primary {
   overflow-y: auto;
 }
 
-/* Слой права в главном окне — без скругления: у окна обычная рамка ОС и
-   прямые углы (.chassis-flush), а радиус .access-modal-backdrop подобран под
+/* Модальный слой в главном окне — без скругления: у окна обычная рамка ОС и
+   прямые углы (.chassis-flush), а радиус .modal-backdrop подобран под
    скруглённый корпус плавающей панели. */
-.main-window .access-modal-backdrop {
+.main-window .modal-backdrop {
   border-radius: 0;
 }
 
@@ -1209,6 +1317,167 @@ button.primary {
   cursor: default;
 }
 
+/* Вход в историю — правый край той же полосы. Тот же приглушённый материал,
+   что у возврата (класс .mw-back на нём стоит вторым), поэтому здесь только
+   положение. Специфичность ровно как у .main-window button.mw-back выше и
+   правило идёт позже — иначе оптическое margin-left: -4px оттуда перебило бы
+   прижатие вправо. */
+.main-window button.mw-history-open {
+  margin-left: auto;
+  margin-right: -4px;
+}
+
+/* ===== История расшифровок (HistoryView.tsx) =====
+   Занимает место дерева действий в нижней области окна. Своя прокрутка и
+   потолок высоты: число записей задаёт пользователь (их бывает две, бывает
+   двести), а верхняя область с текстом — неподвижная часть интерфейса, и
+   выдавливать её растущей сеткой плиток нельзя. 40vh — примерно две трети
+   нижней области на окне минимальной высоты. */
+.mw-history {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 40vh;
+  overflow-y: auto;
+  /* Полоса прокрутки не должна наезжать на край плиток. */
+  padding-right: 2px;
+}
+
+.mw-history-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mw-history-count {
+  font-size: 12px;
+  color: #9a9aa0;
+}
+
+/* Очистка всей истории — справа, отдельно от плиток и мельче кнопок
+   действий. Материал общий (.chassis button); красной её не делаем — цвет
+   тревоги на кнопке, которую видно всегда, перестаёт значить тревогу.
+   Безвозвратность объясняет подтверждение, а не оттенок. */
+.main-window button.mw-history-clear {
+  margin-left: auto;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.mw-history-empty {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #8e8e93;
+  padding: 4px 2px;
+}
+
+/* Сетка плиток — auto-fill, а не фиксированное число колонок, как у
+   .action-grid: у действий состав известен и колонки подобраны под него, а
+   здесь ширину делит между собой произвольное число одинаковых плиток.
+   На штатных 720px окна получается три колонки. */
+.history-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+}
+
+.history-tile {
+  position: relative;
+}
+
+/* Сама плитка — обычная глянцевая кнопка корпуса (.chassis button), здесь
+   переопределяется только то, что делает её плиткой, а не кнопкой в ряду:
+   текст в две строки и по левому краю, дата над ним. Материал, блик,
+   нажатие и гравировка бейджа приходят сверху и не повторяются. */
+.history-tile-open {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 11px;
+  border-radius: 8px;
+}
+
+.history-tile-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* Место под кнопку удаления в правом верхнем углу плитки. */
+  padding-right: 18px;
+}
+
+.history-tile-date {
+  font-size: 11px;
+  color: #c7c7cc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Длительность — той же гравировкой, что хоткеи на кнопках действий
+   (.shortcut-badge): вторичное число, вырезанное в поверхности кнопки. */
+.history-tile-head .shortcut-badge {
+  margin-left: auto;
+}
+
+/* Начало текста — ровно две строки с многоточием. Высота плитки от длины
+   текста не зависит: сетка из плиток разной высоты читалась бы как сбой
+   вёрстки. line-clamp — вместе с -webkit-префиксом: у WKWebView (а это
+   единственный движок, на котором это приложение работает) поддержан
+   именно префиксный вариант. */
+.history-tile-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.35;
+  /* Две строки всегда, даже когда текст в одну: иначе соседние плитки в ряду
+     разной высоты. */
+  min-height: calc(2 * 1.35em);
+  color: #f2f2f7;
+  white-space: normal;
+  text-shadow: none;
+}
+
+/* Удаление одной записи — маленький крестик в углу плитки. Виден всегда, но
+   приглушён: это приватный инструмент, и прятать его до наведения мыши
+   значит прятать единственный способ убрать сказанное. Материал кнопки
+   корпуса здесь снят целиком — глянцевая кнопка поверх глянцевой плитки
+   читалась бы как вторая, главная кнопка. */
+.main-window button.history-tile-delete {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  box-shadow: none;
+  text-shadow: none;
+  color: rgba(242, 242, 247, 0.45);
+}
+
+.main-window button.history-tile-delete:hover {
+  color: #fff;
+  background: rgba(255, 69, 58, 0.85);
+}
+
+.main-window button.history-tile-delete:active {
+  background: rgba(255, 69, 58, 0.6);
+  transform: none;
+}
+
 /* Плотность — единственное, что у кнопок главного окна своё; материал
    (глянец, блик, инверсия при нажатии, гравированный бейдж) целиком приходит
    от .chassis button выше и здесь не повторяется ни одной строкой.
@@ -1270,20 +1539,44 @@ button.primary {
   gap: 8px;
 }
 
-.mw-error {
+/* Строка сообщения над меню — одна геометрия на два смысла: ошибка действия
+   (.mw-error) и нейтральное уведомление (.mw-notice, например «текст заменён
+   записью из истории» с кнопкой Undo). Различаются ТОЛЬКО цветом фона и
+   рамки: форма, отступы и раскладка у них общие, и разъезжаться им незачем. */
+.mw-error,
+.mw-notice {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   padding: 8px 10px;
   border-radius: 6px;
-  background: rgba(255, 69, 58, 0.12);
-  border: 1px solid rgba(255, 69, 58, 0.3);
   font-size: 12px;
   color: #f2f2f7;
 }
 
+.mw-error {
+  background: rgba(255, 69, 58, 0.12);
+  border: 1px solid rgba(255, 69, 58, 0.3);
+}
+
+/* Уведомление — не красное: ничего не сломалось, текст заменён ровно так, как
+   и было задумано. Нейтральная светлая плашка на корпусе. */
+.mw-notice {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
 .mw-error-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+/* Кнопки в строке сообщения — мельче кнопок действий: это не выбор, ради
+   которого открыли окно, а «понял»/«верни как было». Тот же материал
+   (.chassis button), только плотность своя, как у .model-actions в
+   настройках. */
+.mw-error-actions button {
+  padding: 5px 10px;
+  font-size: 12px;
+}
 
 /* .mw-panel-stack накладывает уходящую и текущую панель уровня меню друг на
    друга в одной ячейке грида — оба видны одновременно ровно то время,
@@ -1292,6 +1585,14 @@ button.primary {
    наибольшей из двух, пока обе присутствуют). */
 .mw-panel-stack {
   display: grid;
+}
+/* Пока открыта история, дерево действий скрыто, но НЕ размонтировано:
+   возврат из истории должен вернуть тот же уровень меню, на котором её
+   открыли, а не проиграть анимацию въезда заново. Правило обязано быть
+   явным — атрибут hidden ставит display:none только у элементов без
+   собственного display, а у этого он grid. */
+.mw-panel-stack[hidden] {
+  display: none;
 }
 .mw-panel-stack > .mw-panel {
   grid-column: 1;

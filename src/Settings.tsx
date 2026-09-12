@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { ShortcutCapture } from './ShortcutCapture'
+import { DictionaryField } from './DictionaryField'
+import { estimatePromptTokens, MAX_PROMPT_TOKENS } from './prompt-budget'
 import {
   findShortcutConflict,
   conflictMessage,
@@ -34,6 +36,7 @@ import {
   type ActionShortcutKey,
 } from './action-tree'
 import { formatBytes } from './format'
+import { reduceDownload, progressLabel, summarize, type Download } from './download-progress'
 
 // Границы ползунков. Второй источник правды рядом с Rust (audio.rs:
 // MIN_GAIN/MAX_GAIN, settings.rs: MIN/MAX_VAD_THRESHOLD) — та же цена, что у
@@ -108,7 +111,12 @@ export function Settings() {
   // Какая модель качается прямо сейчас. Одна за раз: событие прогресса одно
   // на все загрузки, и второй параллельной шкале взяться неоткуда.
   const [busyId, setBusyId] = useState('')
-  const [progress, setProgress] = useState<Progress | null>(null)
+  // Состояние загрузки целиком (байты, скорость, подпись) живёт в
+  // download-progress.ts — здесь только хранится и передаётся в редьюсер.
+  // Оно объявлено в КОРНЕВОМ компоненте, а не внутри раздела Models, поэтому
+  // переключение раздела его не теряет: BODY — объект уже построенных
+  // элементов, меняется только то, какой из них отрисован.
+  const [modelDl, setModelDl] = useState<Download | null>(null)
   const [modelError, setModelError] = useState('')
 
   const refreshCatalog = useCallback(() => {
@@ -119,18 +127,26 @@ export function Settings() {
 
   useEffect(() => {
     refreshCatalog()
-    const un = listen<Progress>('model:progress', (e) => setProgress(e.payload))
+    const un = listen<Progress>('model:progress', (e) =>
+      setModelDl((prev) =>
+        reduceDownload(prev, { type: 'progress', at: Date.now(), progress: e.payload })
+      )
+    )
     return () => {
       un.then((f) => f())
     }
   }, [refreshCatalog])
 
-  const [vadProgress, setVadProgress] = useState<Progress | null>(null)
+  const [vadDl, setVadDl] = useState<Download | null>(null)
   const [vadBusy, setVadBusy] = useState(false)
   const [vadError, setVadError] = useState('')
 
   useEffect(() => {
-    const un = listen<Progress>('vad:progress', (e) => setVadProgress(e.payload))
+    const un = listen<Progress>('vad:progress', (e) =>
+      setVadDl((prev) =>
+        reduceDownload(prev, { type: 'progress', at: Date.now(), progress: e.payload })
+      )
+    )
     return () => {
       un.then((f) => f())
     }
@@ -252,7 +268,12 @@ export function Settings() {
   const onDownload = async (id: string) => {
     setBusyId(id)
     setModelError('')
-    setProgress(null)
+    setModelDl((prev) =>
+      reduceDownload(prev, {
+        type: 'start',
+        label: catalog?.models.find((m) => m.id === id)?.label ?? id,
+      })
+    )
     try {
       const path = await downloadModel(id)
       // Скачанная модель сразу становится активной — так делал и прежний
@@ -263,7 +284,10 @@ export function Settings() {
       setModelError(String(e))
     } finally {
       setBusyId('')
-      setProgress(null)
+      // Гасим индикатор одинаково после успеха и после отказа: событий
+      // прогресса больше не будет, и погасить его потом станет некому —
+      // полоса осталась бы на экране до перезапуска окна.
+      setModelDl((prev) => reduceDownload(prev, { type: 'done' }))
       refreshCatalog()
     }
   }
@@ -295,7 +319,7 @@ export function Settings() {
   const onDownloadVad = async () => {
     setVadBusy(true)
     setVadError('')
-    setVadProgress(null)
+    setVadDl((prev) => reduceDownload(prev, { type: 'start', label: catalog?.vad.label ?? 'Silero' }))
     try {
       const path = await downloadVadModel()
       patch({ vadModelPath: path })
@@ -303,19 +327,23 @@ export function Settings() {
       setVadError(String(e))
     } finally {
       setVadBusy(false)
+      // Раньше здесь не гасили ничего, и полоса VAD оставалась под строкой
+      // Silero навсегда — после удачной загрузки на все 100%, после
+      // неудачной на том месте, где оборвалось.
+      setVadDl((prev) => reduceDownload(prev, { type: 'done' }))
       refreshCatalog()
     }
   }
 
-  // Полоса прогресса или счётчик байт — общая для моделей и VAD.
-  // I9: без Content-Length нет полосы прогресса, но счётчик байт хотя бы
-  // показывает, что загрузка не зависла.
-  const progressBar = (p: Progress) =>
-    p.total > 0 ? (
-      <progress value={p.downloaded} max={p.total} />
-    ) : (
-      <span className="hint">{(p.downloaded / 1_000_000).toFixed(1)} MB downloaded…</span>
-    )
+  // Полоса прогресса со скоростью — общая для моделей и VAD.
+  // I9: без Content-Length полосы нет, но счётчик байт и скорость рядом
+  // показывают, что загрузка не зависла.
+  const downloadIndicator = (d: Download) => (
+    <div className="download-progress">
+      {d.total > 0 && <progress value={d.downloaded} max={d.total} />}
+      <span className="hint">{progressLabel(d)}</span>
+    </div>
+  )
 
   // Сохранённое устройство, которого сейчас нет в системе. Из списка его не
   // выбрасываем — иначе выбор «сбросится сам» и это будет выглядеть багом.
@@ -407,7 +435,7 @@ export function Settings() {
             <span className="model-size">{size}</span>
           </div>
           <p className="hint">{entry.note}</p>
-          {downloading && progress && progressBar(progress)}
+          {downloading && modelDl && downloadIndicator(modelDl)}
         </div>
         <div className="model-actions" onClick={(e) => e.stopPropagation()}>
           {entry.state === 'missing' && (
@@ -456,7 +484,7 @@ export function Settings() {
             </span>
           </div>
           <p className="hint">{catalog?.vad.note}</p>
-          {vadProgress && progressBar(vadProgress)}
+          {vadDl && downloadIndicator(vadDl)}
         </div>
         <div className="model-actions">
           <button type="button" onClick={onDownloadVad} disabled={vadBusy}>
@@ -472,6 +500,12 @@ export function Settings() {
       </p>
     </>
   )
+
+  // Оценка занятого бюджета подсказки whisper — считается на каждый рендер
+  // из актуального значения поля (разбор шести сотен символов, мемоизация
+  // здесь была бы дороже самого счёта).
+  const dictionaryTokens = estimatePromptTokens(s.dictionary)
+  const dictionaryOverBudget = dictionaryTokens > MAX_PROMPT_TOKENS
 
   const recognitionSection = (
     <>
@@ -511,20 +545,33 @@ export function Settings() {
         {!s.vadModelPath && 'Download the detector in Models to use it.'}
       </p>
 
-      <label>
-        Dictionary
-        <textarea
-          className="dictionary"
-          rows={5}
-          value={s.dictionary}
-          placeholder={'React\nKubernetes\nDocker Compose'}
-          onChange={(e) => patch({ dictionary: e.target.value })}
-        />
-      </label>
+      {/* Тот же редактор с Vim-биндингами, что в панели и главном окне, — не
+          textarea: словарь правят так же, как правят список, а не так, как
+          пишут фразу (/ для поиска термина, dd чтобы выбросить строку).
+          Значение неуправляемое, компонент зеркалит документ сюда сам —
+          почему именно так, см. DictionaryField.tsx. */}
+      <DictionaryField
+        initialValue={s.dictionary}
+        onChange={(dictionary) => patch({ dictionary })}
+      />
       <p className="hint">
         Say "задеплоим на Kubernetes" and whisper writes "Кубернетес". Put the words you say in
-        English here — one per line, or separated by commas — and they come back spelled the way
-        you typed them. An empty field passes nothing to whisper at all.
+        English here — one per line (or separated by commas, both work) — and they come back
+        spelled the way you typed them. An empty field passes nothing to whisper at all. The field
+        is a Vim editor: press <code>i</code> to type, <code>Esc</code> to go back to commands,{' '}
+        <code>dd</code> to drop a term, <code>/</code> to search.
+      </p>
+      {/* Счётчик бюджета — единственное, что стоит между пользователем и
+          тихой потерей терминов: whisper.cpp режет подсказку по 224 токенам
+          С НАЧАЛА списка и молча (см. prompt-budget.ts). Показан всегда, а не
+          только при переполнении: «сколько осталось» нужно знать ДО того, как
+          дописал лишнее, а не после. */}
+      <p className={`hint dictionary-budget${dictionaryOverBudget ? ' err' : ''}`}>
+        {dictionaryOverBudget
+          ? `Over the prompt budget: about ${dictionaryTokens} of ${MAX_PROMPT_TOKENS} tokens. ` +
+            'Whisper cuts the prompt down to size from the top of the list, without saying so — ' +
+            'the terms written first would stop being suggested. Shorten the list.'
+          : `Prompt budget: about ${dictionaryTokens} of ${MAX_PROMPT_TOKENS} tokens used.`}
       </p>
     </>
   )
@@ -793,6 +840,14 @@ export function Settings() {
 
   const current = SECTIONS.find((sec) => sec.id === section) ?? SECTIONS[0]
 
+  // Идущие загрузки одной строкой. Индикатор ставим на пункт Models в левом
+  // столбце, а не в подвал рядом с Save и не отдельной плашкой: столбец виден
+  // из любого раздела, а Models — ровно то место, куда человек пойдёт смотреть
+  // подробности, так что признак активности стоит там же, где на него можно
+  // нажать. Подвал бы для этого не годился: там кнопка сохранения формы, и
+  // строка про сеть рядом с ней читалась бы как «сохранение идёт».
+  const downloads = summarize([modelDl, vadDl])
+
   return (
     <div className="settings chassis chassis-flush">
       <nav className="settings-nav">
@@ -803,7 +858,29 @@ export function Settings() {
             className={`settings-nav-item ${sec.id === section ? 'selected' : ''}`}
             onClick={() => setSection(sec.id)}
           >
-            {sec.title}
+            <span className="settings-nav-row">
+              {sec.title}
+              {sec.id === 'models' && downloads && (
+                <span className="nav-download-percent">
+                  {/* Длина неизвестна — процента нет, но многоточие всё равно
+                      отвечает на главный вопрос: процесс жив. */}
+                  {downloads.percent === null ? '…' : `${downloads.percent}%`}
+                </span>
+              )}
+            </span>
+            {sec.id === 'models' && downloads && (
+              <span className="nav-download" title={`Downloading ${downloads.label}`}>
+                {/* Без value полоса становится бегущей — единственный честный
+                    вид, когда длина неизвестна: заполненная на ноль выглядела
+                    бы как застрявшая. */}
+                {downloads.percent === null ? (
+                  <progress />
+                ) : (
+                  <progress value={downloads.percent} max={100} />
+                )}
+                <span className="nav-download-speed">{downloads.speed || 'starting…'}</span>
+              </span>
+            )}
           </button>
         ))}
       </nav>

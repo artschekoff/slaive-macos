@@ -4,6 +4,7 @@ import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { EditorView } from '@codemirror/view'
 import { Vim } from '@replit/codemirror-vim'
 import {
+  addHistoryEntry,
   checkAccessibilityPermission,
   copyText,
   followToMainWindow,
@@ -153,7 +154,11 @@ type AccessibilityErrorPayload = { message: string; pane: PrivacyPane }
 // расшифровкой (см. RecStartPayload/TranscriptPayload в commands.rs): панели
 // не приходится помнить режим между ними.
 type RecStartPayload = { append: boolean }
-type TranscriptPayload = { text: string; append: boolean }
+// durationSecs — длительность записи в секундах, единственное, что панель
+// пересылает дальше в журнал расшифровок (см. addHistoryEntry ниже). При
+// дозаписи это длительность ВСЕГО накопленного звука, а не последнего
+// фрагмента.
+type TranscriptPayload = { text: string; append: boolean; durationSecs: number }
 // icon — уже готовый data: URL или null (нет иконки/не удалось сконвертировать).
 type SourceAppPayload = { name: string; icon: string | null }
 
@@ -462,6 +467,23 @@ export function Overlay() {
           // сценарий), и эти правки обязаны пережить добавку.
           if (e.payload.append) appendTranscript(view, e.payload.text)
           else resetEditorContent(view, e.payload.text)
+          // В журнал уходит ИТОГОВЫЙ текст — то, что лежит в документе ПОСЛЕ
+          // применения расшифровки. При дозаписи бэкенд итогового текста не
+          // знает (он прислал только новый фрагмент), поэтому читаем его
+          // здесь, из единственного места, где он существует целиком.
+          //
+          // Ошибку записи в журнал НЕ показываем в панели и не роняем ею
+          // фазу: расшифровка удалась, текст на экране, вставка и копирование
+          // работают. Сорвавшаяся запись в историю — потеря будущего удобства,
+          // а не текущей работы, и превращать её в красную строку поверх
+          // готового текста значило бы соврать о том, что случилось.
+          // В консоль уходит только причина от бэкенда, без текста.
+          const full = view.state.doc.toString()
+          if (full.trim()) {
+            addHistoryEntry(full, e.payload.durationSecs).catch((err) => {
+              console.error('история: запись не сохранена:', String(err))
+            })
+          }
           // Фокус на РЕДАКТОР (не просто на окно — это уже сделал Rust,
           // emit_to("transcript") + focus_overlay в одном месте, см. отчёт),
           // чтобы курсор сразу был виден и правка началась немедленно.
@@ -1019,14 +1041,14 @@ export function Overlay() {
           побочных эффектов — копирование в буфер уже случилось до показа
           слоя и остаётся доступным по кнопке Copy независимо от него. */}
       {showAccessModal && (
-        <div className="access-modal-backdrop" role="presentation">
-          <div className="access-modal" role="dialog" aria-modal="true" aria-label="Accessibility permission required">
-            <p className="access-modal-text">
+        <div className="modal-backdrop" role="presentation">
+          <div className="modal" role="dialog" aria-modal="true" aria-label="Accessibility permission required">
+            <p className="modal-text">
               Slaive can't send keystrokes to other apps yet, so Paste can't insert the text
               automatically. The text is already on your clipboard — press Cmd+V to paste it
               manually, or turn on Accessibility access below to make Paste work directly.
             </p>
-            <div className="access-modal-actions">
+            <div className="modal-actions">
               <button
                 className="primary"
                 onClick={() => {

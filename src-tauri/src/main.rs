@@ -3,6 +3,7 @@
 mod ai;
 mod audio;
 mod commands;
+mod history;
 mod macos;
 mod model;
 mod settings;
@@ -48,6 +49,10 @@ fn main() {
             commands::get_source_app,
             commands::set_overlay_has_text,
             commands::set_window_opacity,
+            commands::list_history,
+            commands::add_history_entry,
+            commands::delete_history_entry,
+            commands::clear_history,
         ])
         .setup(|app| {
             let dir = commands::data_dir(app.handle())?;
@@ -143,10 +148,15 @@ fn main() {
                 });
             }
 
+            // Главное окно открывается ещё и отсюда, а не только кнопкой
+            // Follow в панели: Follow недоступен на пустом тексте, поэтому без
+            // этого пункта до истории расшифровок нельзя было добраться, не
+            // надиктовав сначала что-нибудь.
+            let main_item = MenuItemBuilder::with_id("main", "Open Slaive…").build(app)?;
             let settings_item = MenuItemBuilder::with_id("settings", "Settings…").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app)
-                .items(&[&settings_item, &quit_item])
+                .items(&[&main_item, &settings_item, &quit_item])
                 .build()?;
 
             // Отдельная иконка для строки меню, а не иконка приложения.
@@ -164,6 +174,7 @@ fn main() {
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id().as_ref() {
+                    "main" => commands::show_main_window(app),
                     "settings" => {
                         if let Some(w) = app.get_webview_window("settings") {
                             let _ = w.show();

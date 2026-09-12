@@ -222,6 +222,38 @@ export const followToMainWindow = (text: string) => invoke<void>('follow_to_main
 export type SourceApp = { name: string; icon: string | null }
 export const getSourceApp = () => invoke<SourceApp | null>('get_source_app')
 
+/** One entry of the transcript history, as it is stored on disk (one JSON
+ *  object per line in `history.jsonl`). The audio is never stored — only the
+ *  text, when it happened and how long the recording was.
+ *
+ *  `id` is the creation time in UTC milliseconds and doubles as the
+ *  identifier (see `history.rs`): unique, human-readable in the file itself,
+ *  and it needs neither a uuid dependency nor a counter on disk. */
+export type HistoryEntry = {
+  id: number
+  text: string
+  /** Seconds of audio behind this text. On an append session this covers the
+   *  whole accumulated recording, matching the accumulated text. */
+  durationSecs: number
+}
+
+/** Reads the history, newest first — the order the tile grid shows it in. */
+export const listHistory = () => invoke<HistoryEntry[]>('list_history')
+
+/** Appends one transcript to the history. Called by the overlay right after a
+ *  transcript lands in its editor, not by the backend: on an append session
+ *  the resulting text exists only in the editor document (the backend sends
+ *  just the new fragment, so hand edits survive), and the history must hold
+ *  the resulting text. Failed or too-short recordings never reach this, since
+ *  the overlay only calls it on a `transcript` event. */
+export const addHistoryEntry = (text: string, durationSecs: number) =>
+  invoke<void>('add_history_entry', { text, durationSecs })
+
+export const deleteHistoryEntry = (id: number) => invoke<void>('delete_history_entry', { id })
+
+/** Wipes the history. Irreversible — the UI asks for confirmation first. */
+export const clearHistory = () => invoke<void>('clear_history')
+
 /** Убирает главное окно и возвращает Dock-иконку (activation policy) в
  *  Accessory — тот же путь, которым окно уходит по крестику (см.
  *  hide_main_window в Rust). Зовётся после успешной вставки. */

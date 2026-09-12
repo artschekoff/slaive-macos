@@ -71,9 +71,19 @@ export function ensureLineNavigationRemap() {
  *  "есть ли текст", а не полный текст на каждое нажатие: оба окна используют
  *  CodeMirror как единственный источник истины и читают doc напрямую в
  *  момент действия (Paste/Copy/запуск действия меню), не через React state
- *  на каждый символ (см. Overlay.tsx/MainWindow.tsx). */
+ *  на каждый символ (см. Overlay.tsx/MainWindow.tsx).
+ *
+ *  `onDocText` — тот же слушатель, но с полным текстом; нужен ТРЕТЬЕМУ
+ *  пользователю редактора — полю словаря в настройках (DictionaryField.tsx).
+ *  Там читать документ «в момент действия» нельзя: кнопка Save живёт в
+ *  подвале окна, снаружи раздела, а раздел при переключении на соседний
+ *  размонтируется вместе с редактором — текст к моменту нажатия Save уже
+ *  уничтожен. Поэтому словарь (и только он) зеркалит документ в состояние
+ *  React. Оверлей и главное окно этот колбэк не передают и продолжают жить
+ *  по-старому. */
 export function transcriptEditorExtensions(opts: {
   onDocChanged?: (hasText: boolean) => void
+  onDocText?: (text: string) => void
   placeholderText?: string
 }): Extension[] {
   ensureLineNavigationRemap()
@@ -125,7 +135,12 @@ export function transcriptEditorExtensions(opts: {
   if (opts.placeholderText !== undefined) extensions.push(placeholder(opts.placeholderText))
   extensions.push(
     EditorView.updateListener.of((update) => {
-      if (update.docChanged) opts.onDocChanged?.(update.state.doc.length > 0)
+      if (!update.docChanged) return
+      opts.onDocChanged?.(update.state.doc.length > 0)
+      // toString() только когда колбэк реально передан: у оверлея и главного
+      // окна на каждое нажатие клавиши материализовывать весь документ
+      // незачем.
+      if (opts.onDocText) opts.onDocText(update.state.doc.toString())
     })
   )
   return extensions
@@ -134,13 +149,24 @@ export function transcriptEditorExtensions(opts: {
 /** Создаёт EditorView с общими расширениями транскрипта поверх заданного
  *  контейнера. Единственная разница между оверлеем и главным окном —
  *  Enter/Escape-экшены оверлея (Paste/Close) — остаётся в Overlay.tsx,
- *  потому что специфична именно ему. */
+ *  потому что специфична именно ему.
+ *
+ *  `doc` — начальное содержимое; по умолчанию пусто, как было у обоих окон
+ *  транскрипта (текст туда приходит позже, событием). Словарь настроек,
+ *  наоборот, открывается уже заполненным, и подставлять его вторым шагом
+ *  через `resetEditorContent` нельзя: это правка документа, она разбудила бы
+ *  `onDocText` и пометила настройки изменёнными в момент открытия раздела. */
 export function createTranscriptEditor(
   parent: HTMLElement,
-  opts: { onDocChanged?: (hasText: boolean) => void; placeholderText?: string }
+  opts: {
+    onDocChanged?: (hasText: boolean) => void
+    onDocText?: (text: string) => void
+    placeholderText?: string
+    doc?: string
+  }
 ): EditorView {
   return new EditorView({
-    state: EditorState.create({ doc: '', extensions: transcriptEditorExtensions(opts) }),
+    state: EditorState.create({ doc: opts.doc ?? '', extensions: transcriptEditorExtensions(opts) }),
     parent,
   })
 }
