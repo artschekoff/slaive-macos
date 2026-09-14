@@ -46,6 +46,7 @@ fn main() {
             commands::check_accessibility_permission,
             commands::open_settings_window,
             commands::follow_to_main_window,
+            commands::capture_selection,
             commands::hide_main_window,
             commands::get_source_app,
             commands::set_overlay_has_text,
@@ -91,6 +92,19 @@ fn main() {
                 // — предыдущей рабочей регистрации не было и взять флаг
                 // неоткуда, кроме как выставить его явно.
                 *app.state::<state::AppState>().hotkey_ok.lock().unwrap() = false;
+            }
+
+            let capture_hotkey = app
+                .state::<state::AppState>()
+                .settings
+                .lock()
+                .unwrap()
+                .capture_hotkey
+                .clone();
+            if let Err(e) = commands::register_capture_hotkey(app.handle(), &capture_hotkey) {
+                // Не роняем запуск: без хоткея захвата приложение остаётся
+                // полностью рабочим, в отличие от хоткея записи.
+                eprintln!("хоткей захвата не зарегистрирован: {e}");
             }
 
             // Без модели приложение бесполезно — сразу показываем настройки.

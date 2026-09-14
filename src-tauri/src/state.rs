@@ -17,6 +17,9 @@ pub struct AppState {
     /// Текущая зарегистрированная глобальная комбинация — нужна, чтобы при
     /// смене хоткея снять именно её, а не все хоткеи разом.
     pub current_hotkey: Mutex<Option<Shortcut>>,
+    /// Зарегистрированный хоткей захвата — хранится, чтобы снять регистрацию
+    /// при смене комбинации. Та же роль, что у `current_hotkey`.
+    pub current_capture_hotkey: Mutex<Option<Shortcut>>,
     /// Успешно ли зарегистрирован хоткей при последней попытке (старт
     /// приложения или сохранение настроек). Если нет — окно настроек должно
     /// предупредить пользователя, что комбинация не работает.
@@ -65,6 +68,7 @@ impl AppState {
             recorder: Mutex::new(None),
             transcriber: Mutex::new(None),
             current_hotkey: Mutex::new(None),
+            current_capture_hotkey: Mutex::new(None),
             hotkey_ok: Mutex::new(true),
             last_recording: Mutex::new(None),
             level_emitter_stop: Mutex::new(None),

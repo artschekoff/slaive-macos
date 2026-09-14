@@ -97,7 +97,6 @@ pub fn send_paste() -> anyhow::Result<()> {
 /// Зачем вообще нажатие, а не чтение выделения напрямую: на macOS прочитать
 /// выделение в чужом приложении нечем. Системное меню «Службы» работает ровно
 /// так же — посылает копирование и читает буфер обмена.
-#[allow(dead_code)]
 pub fn send_copy() -> anyhow::Result<()> {
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow!("couldn't create a CGEventSource"))?;
@@ -133,7 +132,6 @@ pub fn send_copy() -> anyhow::Result<()> {
 /// возвращает, а при пустом выделении Cmd+C вообще ничего не делает — и оба
 /// случая выглядят как «в буфере по-прежнему старое значение». Счётчик
 /// отвечает на этот вопрос однозначно.
-#[allow(dead_code)]
 pub fn pasteboard_change_count() -> i64 {
     use objc2_app_kit::NSPasteboard;
     // generalPasteboard() возвращает синглтон, живущий столько же, сколько

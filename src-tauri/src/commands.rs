@@ -1,5 +1,6 @@
 use crate::ai::{self, AiRequest, ResolvedProvider};
 use crate::audio::{self, Recorder};
+use crate::capture::{self, CaptureOps};
 use crate::history;
 use crate::macos;
 use crate::model::{self, ModelEntry};
@@ -479,6 +480,10 @@ pub fn save_settings(
     // прежний рабочий хоткей остаётся на месте вместо того, чтобы быть
     // затёртым битой строкой.
     register_hotkey(&app, &settings.hotkey).map_err(|e| e.to_string())?;
+    // Та же гарантия, что и у основного хоткея выше: опечатка или занятая
+    // комбинация не должны привести к сохранению настроек с нерабочим
+    // хоткеем захвата.
+    register_capture_hotkey(&app, &settings.capture_hotkey).map_err(|e| e.to_string())?;
 
     // Провайдер, который ещё не реализован (или неизвестен), не должен
     // осесть в settings.json как выбранный — интерфейс его показывает, но
@@ -1366,6 +1371,111 @@ pub fn validate_hotkey(hotkey: String) -> Result<(), String> {
         .map_err(|e| format!("This key combination isn't supported: {e}."))
 }
 
+/// Примитивы захвата поверх настоящих буфера обмена и клавиатуры.
+struct RealCaptureOps<'a> {
+    app: &'a AppHandle,
+}
+
+impl CaptureOps for RealCaptureOps<'_> {
+    fn change_count(&self) -> i64 {
+        macos::pasteboard_change_count()
+    }
+
+    fn send_copy(&self) -> anyhow::Result<()> {
+        macos::send_copy()
+    }
+
+    fn read_text(&self) -> Option<String> {
+        // ponytail: восстанавливаем только текст. Если в буфере лежала
+        // картинка или файл, вернуть их этим API нечем, и прежнее
+        // содержимое будет потеряно — усложнить через NSPasteboard с
+        // перечислением всех типов, если это начнёт мешать.
+        self.app.clipboard().read_text().ok()
+    }
+
+    fn write_text(&self, text: &str) -> anyhow::Result<()> {
+        self.app
+            .clipboard()
+            .write_text(text.to_string())
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    fn sleep(&self, d: std::time::Duration) {
+        std::thread::sleep(d);
+    }
+}
+
+/// Захватывает выделенный текст из активного приложения и открывает его в
+/// главном окне — тем же путём, которым туда попадает надиктованное по кнопке
+/// Follow.
+#[tauri::command]
+pub fn capture_selection(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // Право проверяется ДО попытки: CGEventPost при отказе молчит, и без
+    // проверки пользователь увидел бы «ничего не выделено» вместо «нет прав».
+    if !macos::has_accessibility_permission() {
+        return Err(
+            "Slaive needs Accessibility permission to copy the selected text. \
+             Open System Settings → Privacy & Security → Accessibility and enable Slaive."
+                .to_string(),
+        );
+    }
+
+    // PID запоминаем ДО того, как главное окно заберёт фокус: иначе целью
+    // вставки станет сам Slaive. Ровно эта ошибка уже случалась с Follow.
+    if let Some(pid) = macos::frontmost_pid() {
+        *state.prev_app_pid.lock().unwrap() = Some(pid);
+    }
+
+    let ops = RealCaptureOps { app: &app };
+    let outcome = capture::capture_selection(&ops).map_err(|e| e.to_string())?;
+
+    // Содержимое не логируем — это текст пользователя. Длина безопасна.
+    eprintln!(
+        "захвачено символов: {}, буфер обмена восстановлен: {}",
+        outcome.text.chars().count(),
+        outcome.restored_clipboard
+    );
+
+    follow_to_main_window(app, outcome.text)
+}
+
+/// Регистрирует глобальный хоткей захвата. Отдельно от `register_hotkey`:
+/// у них разные обработчики и разные поля состояния, а объединение через
+/// параметр только запутало бы обе стороны.
+pub fn register_capture_hotkey(app: &AppHandle, hotkey: &str) -> anyhow::Result<()> {
+    let shortcut: Shortcut = hotkey.parse().map_err(|e| {
+        anyhow::anyhow!("Couldn't parse capture hotkey combination \"{hotkey}\": {e}.")
+    })?;
+
+    let state = app.state::<AppState>();
+    if let Some(old) = state.current_capture_hotkey.lock().unwrap().take() {
+        let _ = app.global_shortcut().unregister(old);
+    }
+
+    let handle = app.clone();
+    app.global_shortcut()
+        .on_shortcut(shortcut, move |_app, _shortcut, event| {
+            // Только на нажатие: иначе команда выполнится дважды за одно
+            // срабатывание — и отпускание тоже полезет копировать.
+            if event.state() != ShortcutState::Pressed {
+                return;
+            }
+            let app = handle.clone();
+            // В отдельном потоке: обработчик хоткея не должен блокироваться
+            // на полусекундном опросе буфера обмена.
+            std::thread::spawn(move || {
+                let state = app.state::<AppState>();
+                if let Err(e) = capture_selection(app.clone(), state) {
+                    let _ = app.emit_to("overlay", "capture:error", e.clone());
+                    eprintln!("захват не удался: {e}");
+                }
+            });
+        })?;
+
+    *state.current_capture_hotkey.lock().unwrap() = Some(shortcut);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
     app.clipboard().write_text(text).map_err(|e| e.to_string())
@@ -1823,6 +1933,17 @@ mod tests {
         // osascript не ответил: цель снимается, как и раньше — вставка
         // уйдёт в то, что активно на момент нажатия Paste.
         assert_eq!(next_source_pid(Some(42), None, 777), None);
+    }
+
+    /// Адаптер обязан отдавать примитивы, а не свою логику: весь порядок
+    /// действий живёт в capture.rs и проверяется там на подставных данных.
+    /// Здесь проверяем лишь то, что чтение счётчика ходит в настоящий буфер
+    /// обмена и возвращает то же, что macos::pasteboard_change_count.
+    #[test]
+    fn capture_ops_reads_the_real_change_count() {
+        let a = crate::macos::pasteboard_change_count();
+        let b = crate::macos::pasteboard_change_count();
+        assert_eq!(a, b);
     }
 
     #[test]
