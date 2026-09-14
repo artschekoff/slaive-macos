@@ -182,6 +182,43 @@ fn trim_to_cap(dir: &Path) -> anyhow::Result<()> {
     write_all(dir, &entries)
 }
 
+/// Заменяет текст и длительность существующей записи. `false` — записи с
+/// таким id больше нет (её удалили из интерфейса или вытеснил потолок), и
+/// тогда звать `append` должен вызывающий: здесь мы не решаем за него.
+///
+/// ЗАЧЕМ ЭТО ЕСТЬ. Одна сессия диктовки — это одна запись журнала, а не по
+/// одной на каждую дозапись: диктовка с двумя добавками оставляла раньше три
+/// почти одинаковые плитки, каждая из которых префикс следующей, и полезна
+/// из них была только последняя. Текст сессии растёт — растёт и её запись.
+///
+/// ЦЕНА. Файл перестаёт быть строго дозаписываемым: обновление переписывает
+/// его целиком (через временный файл и переименование, как `delete`). Двести
+/// записей это порядка сотен килобайт — незаметно на фоне самой расшифровки,
+/// которая длится секунды. Альтернатива (писать один раз в конце сессии)
+/// стоила бы дороже: падение посреди сессии унесло бы текст целиком, тогда
+/// как здесь на диске всегда лежит то, что уже прозвучало.
+///
+/// ponytail: перезапись всего файла на каждую дозапись, а не правка одной
+/// строки на месте. Потолок журнала — 200 записей (`MAX_ENTRIES`), то есть
+/// сотни килобайт против секунд, которые перед этим заняла расшифровка.
+/// Усложнять (индекс смещений, отдельный файл текущей сессии) — если потолок
+/// журнала когда-нибудь вырастет на порядок.
+///
+/// ЭТО НЕ ПУТЬ ДЛЯ ПРАВОК РУКАМИ. Обновление зовётся только по приходу новой
+/// расшифровки (см. `commands::update_history_entry` и обработчик
+/// `transcript` в панели). Журнал — запись того, что было сказано, а не
+/// текущего состояния документа.
+pub fn update(dir: &Path, id: u64, text: &str, duration_secs: f32) -> anyhow::Result<bool> {
+    let mut entries = load(dir)?;
+    let Some(entry) = entries.iter_mut().find(|e| e.id == id) else {
+        return Ok(false);
+    };
+    entry.text = text.to_string();
+    entry.duration_secs = duration_secs;
+    write_all(dir, &entries)?;
+    Ok(true)
+}
+
 /// Удаляет одну запись по идентификатору. Отсутствие такой записи — не
 /// ошибка: интерфейс мог показывать список, из которого её уже удалили.
 pub fn delete(dir: &Path, id: u64) -> anyhow::Result<()> {
@@ -339,6 +376,69 @@ mod tests {
         let entries = load(&dir).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].text, "целая запись");
+    }
+
+    /// Сессия с двумя дозаписями — ОДНА запись журнала, а не три плитки,
+    /// каждая из которых префикс следующей.
+    #[test]
+    fn update_grows_one_entry_instead_of_adding_new_ones() {
+        let dir = tmp();
+        let e = append(&dir, "первый кусок", 2.0).unwrap();
+        assert!(update(&dir, e.id, "первый кусок второй", 4.0).unwrap());
+        assert!(update(&dir, e.id, "первый кусок второй третий", 6.5).unwrap());
+
+        let entries = load(&dir).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, e.id, "идентификатор сессии не меняется");
+        assert_eq!(entries[0].text, "первый кусок второй третий");
+        assert_eq!(entries[0].duration_secs, 6.5);
+    }
+
+    /// Обновление трогает ровно одну запись; соседние остаются как были —
+    /// и по тексту, и по порядку.
+    #[test]
+    fn update_touches_only_its_own_entry() {
+        let dir = tmp();
+        let a = append(&dir, "до", 1.0).unwrap();
+        let b = append(&dir, "цель", 1.0).unwrap();
+        let c = append(&dir, "после", 1.0).unwrap();
+        assert!(update(&dir, b.id, "цель выросла", 3.0).unwrap());
+
+        let entries = load(&dir).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!((entries[0].id, entries[0].text.as_str()), (a.id, "до"));
+        assert_eq!((entries[1].id, entries[1].text.as_str()), (b.id, "цель выросла"));
+        assert_eq!((entries[2].id, entries[2].text.as_str()), (c.id, "после"));
+    }
+
+    /// Запись сессии могли удалить плиткой или вытеснить потолком, пока
+    /// сессия ещё идёт. Это `false`, а не ошибка и не воскрешение записи с
+    /// прежним id: решает вызывающий (он допишет новую).
+    #[test]
+    fn update_of_a_missing_entry_reports_false_and_changes_nothing() {
+        let dir = tmp();
+        let e = append(&dir, "единственная", 1.0).unwrap();
+        delete(&dir, e.id).unwrap();
+        assert!(!update(&dir, e.id, "продолжение", 2.0).unwrap());
+        assert!(load(&dir).unwrap().is_empty());
+
+        // И на пустом (несуществующем) файле тоже.
+        let empty = tmp();
+        assert!(!update(&empty, 1, "что-то", 1.0).unwrap());
+    }
+
+    /// Обновление проходит тем же атомарным путём, что и удаление: временный
+    /// файл после него остаться не должен, а многострочный текст обязан
+    /// остаться одной строкой файла.
+    #[test]
+    fn update_stays_atomic_and_one_line_per_entry() {
+        let dir = tmp();
+        let e = append(&dir, "первая строка", 1.0).unwrap();
+        update(&dir, e.id, "первая строка\nвторая строка", 2.0).unwrap();
+        assert!(!dir.join(TMP_FILE_NAME).exists());
+        let raw = std::fs::read_to_string(file_path(&dir)).unwrap();
+        assert_eq!(raw.lines().count(), 1);
+        assert_eq!(load(&dir).unwrap()[0].text, "первая строка\nвторая строка");
     }
 
     #[test]

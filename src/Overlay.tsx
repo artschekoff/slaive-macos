@@ -5,6 +5,7 @@ import { EditorView } from '@codemirror/view'
 import { Vim } from '@replit/codemirror-vim'
 import {
   addHistoryEntry,
+  updateHistoryEntry,
   checkAccessibilityPermission,
   copyText,
   followToMainWindow,
@@ -196,6 +197,23 @@ export function Overlay() {
   // молча подменять микрофон нельзя, человек будет думать, что диктует в
   // iPhone. Держится до следующей записи, а не гаснет по таймеру.
   const [deviceNotice, setDeviceNotice] = useState('')
+  // Потолок накопленного звука выбран (см. audio::MAX_SESSION_SAMPLES): запись
+  // остановлена на десятой минуте или дозапись вообще не началась. Тоже
+  // уведомление, а не ошибка — текст на месте, расшифровка идёт своим чередом,
+  // и фаза ошибки тут врала бы. Держится до начала СЛЕДУЮЩЕЙ сессии: пока
+  // сессия та же, причина никуда не делась, и гасить её было бы возвращением к
+  // молчаливому потолку.
+  const [limitNotice, setLimitNotice] = useState('')
+  // Запись журнала, в которую растёт эта сессия. Одна сессия — одна плитка:
+  // без этого диктовка с двумя дозаписями оставляла три почти одинаковые
+  // записи, каждая префикс следующей.
+  //
+  // Хранится ПРОМИС последней записи в журнал, а не голый id: следующая
+  // расшифровка пристраивается к нему через .then, поэтому она не может
+  // увидеть ещё не проставленный id и завести вторую плитку. `null` внутри —
+  // «записи пока нет» (сессия только началась или прошлая запись сорвалась).
+  // Ref, а не state: значение нужно только внутри обработчика и не рисуется.
+  const historyWriteRef = useRef<Promise<number | null>>(Promise.resolve(null))
   const [permissionPane, setPermissionPane] = useState<PrivacyPane | null>(null)
   // Модальный слой "нет права на вставку" — показывается СРАЗУ по нажатию
   // Paste, если право уже отсутствует (см. onPaste), а не после круга
@@ -413,6 +431,9 @@ export function Overlay() {
         pcmRef.current = null
         setDuration(0)
         if (!append) {
+          // Новая сессия — новая запись журнала и чистый счёт по потолку.
+          historyWriteRef.current = Promise.resolve(null)
+          setLimitNotice('')
           setLevels([])
           runningMaxRef.current = REF_MIN
           // Шапка приходит отдельным событием с фонового потока чуть позже —
@@ -478,11 +499,35 @@ export function Overlay() {
           // а не текущей работы, и превращать её в красную строку поверх
           // готового текста значило бы соврать о том, что случилось.
           // В консоль уходит только причина от бэкенда, без текста.
+          //
+          // ОДНА СЕССИЯ — ОДНА ЗАПИСЬ. Первая расшифровка сессии заводит
+          // запись, дозаписи растят ЕЁ ЖЕ (см. updateHistoryEntry): иначе
+          // диктовка с двумя добавками оставляла три плитки, каждая префикс
+          // следующей, и полезна была только последняя. Идентификатор живёт
+          // здесь, потому что здесь же живёт и сам итоговый текст.
+          //
+          // Пишем на КАЖДОЙ расшифровке, а не один раз в конце сессии: конца
+          // у неё нет ни в каком надёжном смысле (панель могут закрыть,
+          // приложение — снять), и отложенная запись теряла бы текст целиком
+          // при падении посреди диктовки. Цена — журнал перестаёт быть
+          // строго дозаписываемым файлом (см. history::update в Rust).
           const full = view.state.doc.toString()
           if (full.trim()) {
-            addHistoryEntry(full, e.payload.durationSecs).catch((err) => {
-              console.error('история: запись не сохранена:', String(err))
-            })
+            const append = e.payload.append
+            const durationSecs = e.payload.durationSecs
+            historyWriteRef.current = historyWriteRef.current
+              .then((entryId) =>
+                append && entryId !== null
+                  ? updateHistoryEntry(entryId, full, durationSecs)
+                  : addHistoryEntry(full, durationSecs)
+              )
+              .catch((err) => {
+                console.error('история: запись не сохранена:', String(err))
+                // Сорвавшаяся запись обрывает цепочку id, но не сессию:
+                // следующая дозапись заведёт новую плитку вместо того,
+                // чтобы писать в неизвестно что.
+                return null
+              })
           }
           // Фокус на РЕДАКТОР (не просто на окно — это уже сделал Rust,
           // emit_to("transcript") + focus_overlay в одном месте, см. отчёт),
@@ -497,6 +542,13 @@ export function Overlay() {
       }),
       listen<string>('rec:device-fallback', (e) => {
         setDeviceNotice(e.payload)
+      }),
+      // Потолок накопленного звука сессии (см. audio::MAX_SESSION_SAMPLES и
+      // spawn_level_emitter/begin_recording в commands.rs). Приходит в двух
+      // случаях: запись остановили на десятой минуте и дозапись отклонили,
+      // потому что десять минут уже набраны. Оба — уведомление, не ошибка.
+      listen<string>('rec:limit', (e) => {
+        setLimitNotice(e.payload)
       }),
       listen<string>('error', (e) => {
         setError(e.payload)
@@ -939,6 +991,11 @@ export function Overlay() {
           запись идёт; но и не подсказка, которую можно не заметить: без неё
           человек будет уверен, что диктует в iPhone. */}
       {deviceNotice && <div className="device-notice">{deviceNotice}</div>}
+      {/* Потолок накопленного звука выбран. Та же поверхность, что у подмены
+          микрофона, и по той же причине: запись и текст в порядке, но
+          происходящее нужно объяснить — молчаливый потолок хуже, чем его
+          отсутствие. */}
+      {limitNotice && <div className="device-notice">{limitNotice}</div>}
       {/* Часть 1: дорожка теперь и элемент управления плеером — клик или
           перетаскивание переставляют позицию воспроизведения (см.
           onLevelsPointerDown/Move/Up и seekToClientX выше). Класс

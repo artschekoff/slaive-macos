@@ -140,23 +140,89 @@ fn spawn_level_emitter(app: AppHandle, stop: Arc<AtomicBool>) {
             return;
         }
         let state = app.state::<AppState>();
-        let peaks = {
+        let (peaks, elapsed_secs) = {
             // Тот же стиль, что и в `drain_peaks`: отравленный мьютекс —
             // не повод ронять поток, просто нечего вернуть на этот тик.
             match state.recorder.lock() {
-                Ok(guard) => guard.as_ref().map(|r| r.drain_peaks()),
-                Err(_) => None,
+                Ok(guard) => match guard.as_ref() {
+                    Some(r) => (Some(r.drain_peaks()), r.elapsed_secs()),
+                    None => (None, 0.0),
+                },
+                Err(_) => (None, 0.0),
             }
+            // Блокировка recorder отпускается ЗДЕСЬ, до проверки потолка
+            // ниже: `end_recording` берёт её сам, и вызвать его, держа её,
+            // значило бы заклинить поток на себе самом.
         };
         // Пусто, если колбэк ещё не успел ничего накопить — это тоже 0.0,
         // а не повод молчать: кадры дорожки идут с постоянным темпом.
+        // Потолок сессии дорожку не касается: уровень по-прежнему считается
+        // из сырых пиков микрофона и шлётся на каждом тике.
         let level = peaks
             .unwrap_or_default()
             .into_iter()
             .fold(0.0f32, f32::max);
         let _ = app.emit_to("overlay", "rec:level", level);
+
+        // Потолок накопленного звука. Проверяется здесь, потому что это
+        // единственное место, которое тикает ВО ВРЕМЯ записи: одна запись
+        // может идти сколько угодно (кнопка микрофона — переключатель, а не
+        // только зажатый хоткей), и проверки на старте было бы мало.
+        //
+        // Достигнут — останавливаем запись и говорим об этом. Всё, что уже
+        // записано, при этом расшифровывается как обычно: потолок обрывает
+        // будущее, а не выбрасывает прошлое.
+        //
+        // ponytail: потолок проверяется тиком этого потока (раз в 50 мс), а
+        // не в колбэке микрофона — перебор возможен на один тик, это около
+        // трёх килобайт при потолке в 38 мегабайт. Усложнять до точного
+        // среза — только если потолок когда-нибудь станет жёстким лимитом
+        // (например упрётся в чужое ограничение по памяти), а не мерой
+        // здравого смысла, как сейчас.
+        let appending = state.appending.lock().map(|a| *a).unwrap_or(false);
+        let accumulated = accumulated_samples(&state, appending);
+        if audio::session_limit_reached(accumulated, elapsed_secs) {
+            eprintln!(
+                "потолок сессии: накоплено {accumulated} сэмплов, текущая запись {elapsed_secs:.1} с — останавливаем"
+            );
+            let _ = app.emit_to("overlay", "rec:limit", SESSION_LIMIT_STOPPED);
+            end_recording(&app);
+            return;
+        }
     });
 }
+
+/// Сколько сэмплов накопит эта сессия. Вне дозаписи — ноль: новая запись
+/// ЗАМЕНИТ `last_recording` целиком, а не продолжит его, и мерить по чужой
+/// прошлой сессии значило бы отказывать на пустом месте.
+///
+/// Режим приходит параметром, а не читается из `state.appending`: у
+/// `begin_recording` он ещё только решается (в состоянии лежит режим прошлой
+/// записи), и прочитать его оттуда значило бы принять решение по устаревшему
+/// флагу. У эмиттера уровней режим, наоборот, уже зафиксирован — он и
+/// передаёт то, что лежит в состоянии.
+fn accumulated_samples(state: &State<'_, AppState>, appending: bool) -> usize {
+    if !appending {
+        return 0;
+    }
+    match state.last_recording.lock() {
+        Ok(pcm) => pcm.as_ref().map(|p| p.len()).unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+/// Запись остановлена потолком сессии. Текст на месте и расшифровка идёт —
+/// это уведомление, а не ошибка.
+const SESSION_LIMIT_STOPPED: &str =
+    "Recording stopped: this session has reached its 10-minute audio limit. \
+Paste or close the panel to start a new one.";
+
+/// Потолок уже выбран, а человек снова зажал хоткей поверх непустой панели.
+/// Запись не начинается вовсе — иначе пришлось бы либо выбросить часть
+/// накопленного звука, либо оставить `Play` играть не то, что написано.
+const SESSION_LIMIT_FULL: &str =
+    "This session already holds 10 minutes of audio — the limit. \
+Paste or close the panel to start a new one.";
 
 /// Папка данных приложения; создаётся при первом обращении.
 pub fn data_dir(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
@@ -756,6 +822,19 @@ pub fn begin_recording(app: &AppHandle) {
             );
         }
     }
+    // Потолок сессии (см. `audio::MAX_SESSION_SAMPLES`). Дозапись к уже
+    // полной сессии не начинается вовсе — и человек узнаёт об этом сразу, а
+    // не после того, как проговорил абзац в никуда. Новую запись (append =
+    // false) это не трогает: она заменяет накопленное, а не продолжает его.
+    //
+    // Проверка стоит ПОСЛЕ двух отказов выше, а не перед ними: «уже пишем» и
+    // «ещё расшифровываю» — про эту секунду, а потолок — про сессию целиком,
+    // и сказать про потолок вместо них значило бы назвать не ту причину.
+    if audio::session_limit_reached(accumulated_samples(&state, append), 0.0) {
+        eprintln!("потолок сессии: дозапись отклонена, накоплено максимум");
+        let _ = app.emit_to("overlay", "rec:limit", SESSION_LIMIT_FULL);
+        return;
+    }
     // Устройство выбирается один раз, на старте записи. Менять его посреди
     // записи нельзя — выбор применяется к следующей (см. бриф).
     let preferred = state.settings.lock().unwrap().input_device.clone();
@@ -944,6 +1023,11 @@ pub fn end_recording(app: &AppHandle) {
         // `add_history_entry`). Считается по СКЛЕЕННОМУ PCM, поэтому при
         // дозаписи относится ко всему, что лежит в редакторе, а не к
         // последнему фрагменту.
+        // Потолок сессии здесь НЕ обрезает: он держится остановкой записи
+        // (см. `spawn_level_emitter`) и отказом начать дозапись (см.
+        // `begin_recording`). Перебор возможен максимум на один тик
+        // эмиттера, и лучше сохранить эти лишние миллисекунды, чем выбросить
+        // звук, из которого уже получен текст.
         let duration_secs;
         {
             let mut slot = state.last_recording.lock().unwrap();
@@ -1460,6 +1544,95 @@ pub fn follow_to_main_window(app: AppHandle, text: String) -> Result<(), String>
     Ok(())
 }
 
+/// Ответ счётчика бюджета подсказки.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptBudget {
+    /// Сколько токенов занимает словарь у токенизатора выбранной модели.
+    /// `None` — модели нет вовсе, считать нечем (и расшифровывать тоже).
+    pub tokens: Option<usize>,
+    /// Потолок whisper.cpp. Едет вместе с числом, чтобы у окна настроек не
+    /// было второй копии этой константы.
+    pub max: usize,
+}
+
+/// Сколько токенов занимает словарь терминов. Это ЕДИНСТВЕННЫЙ счётчик в
+/// приложении: фронтенд своей оценки больше не держит.
+///
+/// Почему счёт переехал на бэкенд. Раньше считали по длине — Rust по байтам,
+/// фронтенд по символам, оба делили на 3.5. Замер на живом токенизаторе (см.
+/// `whisper::tests::prompt_token_length_estimates_are_wrong_in_both_directions`)
+/// показал, что символов на токен у whisper от 1.5 до 6.2 в зависимости от
+/// письма и регистра: английский список аббревиатур обе оценки ЗАНИЖАЮТ (это
+/// опасное направление — предупреждения нет, а термины уже отброшены),
+/// кириллический словарь Rust завышал в полтора раза, а фронтенд занижал на
+/// четверть. Ни одна формула по длине не годится рядом с потолком 224,
+/// поэтому здесь считает та же модель, которая будет расшифровывать.
+///
+/// Команда асинхронная и уводит работу в `spawn_blocking` по той же причине,
+/// что и `get_source_app`: синхронная команда Tauri выполняется на главном
+/// потоке, а здесь возможна загрузка модели на секунду-полторы.
+///
+/// ponytail: если модель ещё не загружена, счётчик её загружает — это тот же
+/// кэш, который всё равно понадобится первой же диктовке, но человек,
+/// заглянувший в настройки и не собиравшийся диктовать, платит за это
+/// памятью. Усложнять (отдельный лёгкий разбор словаря модели ради одного
+/// токенизатора) — если появятся жалобы на память окна настроек.
+#[tauri::command]
+pub async fn count_prompt_tokens(app: AppHandle, dictionary: String) -> Result<PromptBudget, String> {
+    let Some(prompt) = crate::whisper::initial_prompt(&dictionary) else {
+        // Пустой словарь — ноль токенов, и для этого модель не нужна.
+        return Ok(PromptBudget {
+            tokens: Some(0),
+            max: crate::whisper::MAX_PROMPT_TOKENS,
+        });
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        // Сначала пробуем уже загруженную модель — обычный случай после
+        // первой же диктовки, и стоит он микросекунды.
+        {
+            let slot = state.transcriber.lock().map_err(|_| {
+                "The previous transcription crashed. Restart Slaive.".to_string()
+            })?;
+            if let Some(t) = slot.as_ref() {
+                return Ok(PromptBudget {
+                    tokens: Some(t.count_tokens(&prompt).map_err(|e| e.to_string())?),
+                    max: crate::whisper::MAX_PROMPT_TOKENS,
+                });
+            }
+        }
+        let Some(model_path) = state.settings.lock().unwrap().model_path.clone() else {
+            // Модели нет — врать числом нельзя, отдаём «посчитать нечем».
+            return Ok(PromptBudget {
+                tokens: None,
+                max: crate::whisper::MAX_PROMPT_TOKENS,
+            });
+        };
+        // Грузим ВНЕ блокировки транскрибера. Занятая блокировка — признак
+        // «идёт расшифровка» для `begin_recording`: держи мы её эти полторы
+        // секунды, хоткей отвечал бы «ещё расшифровываю» на пустом месте.
+        let transcriber = Transcriber::load(&model_path).map_err(|e| e.to_string())?;
+        let tokens = transcriber.count_tokens(&prompt).map_err(|e| e.to_string())?;
+        // Кладём в тот же кэш, которым пользуется расшифровка. Если за время
+        // загрузки его успела занять диктовка — её модель и остаётся, а наша
+        // просто освобождается: две одновременно в памяти не живут.
+        let mut slot = state
+            .transcriber
+            .lock()
+            .map_err(|_| "The previous transcription crashed. Restart Slaive.".to_string())?;
+        if slot.is_none() {
+            *slot = Some(transcriber);
+        }
+        Ok(PromptBudget {
+            tokens: Some(tokens),
+            max: crate::whisper::MAX_PROMPT_TOKENS,
+        })
+    })
+    .await
+    .map_err(|e| format!("Couldn't count the dictionary: {e}."))?
+}
+
 /// Отдаёт PCM последней завершённой записи (16 кГц моно) для воспроизведения
 /// через WebAudio на фронтенде. `None`, если ещё ничего не записали.
 #[tauri::command]
@@ -1498,8 +1671,11 @@ pub fn list_history(app: AppHandle) -> Result<Vec<history::Entry>, String> {
 /// Неудачные и слишком короткие записи сюда не доходят по построению: панель
 /// зовёт эту команду только по событию `transcript`, а его не бывает без
 /// успешной расшифровки.
+///
+/// Возвращает id созданной записи: панель держит его до конца сессии и на
+/// следующих дозаписях зовёт уже `update_history_entry` (см. его doc).
 #[tauri::command]
-pub fn add_history_entry(app: AppHandle, text: String, duration_secs: f32) -> Result<(), String> {
+pub fn add_history_entry(app: AppHandle, text: String, duration_secs: f32) -> Result<u64, String> {
     let dir = data_dir(&app).map_err(|e| e.to_string())?;
     let entry = history::append(&dir, &text, duration_secs).map_err(|e| e.to_string())?;
     // id и длительность — числа, их можно; текста в логе нет.
@@ -1509,7 +1685,43 @@ pub fn add_history_entry(app: AppHandle, text: String, duration_secs: f32) -> Re
         entry.duration_secs,
         history::file_bytes(&dir)
     );
-    Ok(())
+    Ok(entry.id)
+}
+
+/// Обновляет запись сессии выросшим текстом — и есть тот механизм, из-за
+/// которого диктовка с двумя дозаписями оставляет ОДНУ плитку, а не три
+/// префикса одного и того же.
+///
+/// Сессия здесь та же, что и для звука: она начинается новой записью (панель
+/// получила `transcript` с `append: false`) и живёт, пока панель дописывает к
+/// тому же тексту. Идентификатор сессии держит панель — единственное место,
+/// где вообще существует итоговый текст (см. `add_history_entry`).
+///
+/// Возвращает id, под которым текст в итоге лежит. Обычно это тот же id;
+/// если записи уже нет (плитку удалили, потолок журнала вытеснил её), она
+/// заводится заново и id меняется — терять сказанное из-за этого незачем.
+///
+/// Правки руками сюда не приходят: команда зовётся только по событию
+/// `transcript`. Журнал — запись того, что было сказано, а не текущего
+/// состояния документа.
+#[tauri::command]
+pub fn update_history_entry(
+    app: AppHandle,
+    id: u64,
+    text: String,
+    duration_secs: f32,
+) -> Result<u64, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    let updated = history::update(&dir, id, &text, duration_secs).map_err(|e| e.to_string())?;
+    if updated {
+        eprintln!(
+            "история: обновлена запись {id}, длительность {duration_secs:.1} с, файл {} байт",
+            history::file_bytes(&dir)
+        );
+        return Ok(id);
+    }
+    eprintln!("история: записи {id} уже нет — заводим новую");
+    add_history_entry(app, text, duration_secs)
 }
 
 #[tauri::command]

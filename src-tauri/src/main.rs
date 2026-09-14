@@ -51,6 +51,8 @@ fn main() {
             commands::set_window_opacity,
             commands::list_history,
             commands::add_history_entry,
+            commands::update_history_entry,
+            commands::count_prompt_tokens,
             commands::delete_history_entry,
             commands::clear_history,
         ])

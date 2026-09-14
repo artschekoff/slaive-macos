@@ -245,9 +245,37 @@ export const listHistory = () => invoke<HistoryEntry[]>('list_history')
  *  the resulting text exists only in the editor document (the backend sends
  *  just the new fragment, so hand edits survive), and the history must hold
  *  the resulting text. Failed or too-short recordings never reach this, since
- *  the overlay only calls it on a `transcript` event. */
+ *  the overlay only calls it on a `transcript` event.
+ *
+ *  Returns the id of the new entry. The overlay keeps it for the rest of the
+ *  session and grows that one entry with `updateHistoryEntry` instead of
+ *  writing a second, near-identical tile per append. */
 export const addHistoryEntry = (text: string, durationSecs: number) =>
-  invoke<void>('add_history_entry', { text, durationSecs })
+  invoke<number>('add_history_entry', { text, durationSecs })
+
+/** Replaces the text and duration of the session's existing entry, so one
+ *  dictation session is one history tile however many times it was appended
+ *  to. Returns the id the text now lives under — normally the same one, but a
+ *  new one if the entry had been deleted or evicted meanwhile.
+ *
+ *  Only ever called when a new transcript arrives. Hand edits never reach it:
+ *  the history records what was said, not what the document currently says. */
+export const updateHistoryEntry = (id: number, text: string, durationSecs: number) =>
+  invoke<number>('update_history_entry', { id, text, durationSecs })
+
+/** Dictionary size against whisper's prompt budget, counted by the tokenizer
+ *  of the selected model — not estimated from length. There is no second
+ *  estimate on this side any more: measured on a real model, characters per
+ *  token range from 1.5 (acronym lists) to 6.2 (English prose), so any
+ *  length-based formula is off by up to 2x in both directions.
+ *
+ *  `tokens` is null when no model is installed, which is the one case nothing
+ *  can be counted — and also the case where the dictionary is unused anyway.
+ *  The call can take a second the first time: it loads the model into the
+ *  same cache transcription uses. */
+export type PromptBudget = { tokens: number | null; max: number }
+export const countPromptTokens = (dictionary: string) =>
+  invoke<PromptBudget>('count_prompt_tokens', { dictionary })
 
 export const deleteHistoryEntry = (id: number) => invoke<void>('delete_history_entry', { id })
 

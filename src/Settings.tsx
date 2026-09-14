@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { ShortcutCapture } from './ShortcutCapture'
 import { DictionaryField } from './DictionaryField'
-import { estimatePromptTokens, MAX_PROMPT_TOKENS } from './prompt-budget'
 import {
   findShortcutConflict,
   conflictMessage,
@@ -22,11 +21,13 @@ import {
   setAiKey,
   testAiConnection,
   setWindowOpacity,
+  countPromptTokens,
   type SettingsResponse as S,
   type ModelCatalog,
   type ModelEntry,
   type InputDevices,
   type Progress,
+  type PromptBudget,
 } from './api'
 import { effectiveBaseUrl, isSelectable, emptyProviderConfig, type AiProviderInfo } from './ai'
 import { SECTIONS, FIRST_SECTION, type SectionId } from './settings-sections'
@@ -177,6 +178,45 @@ export function Settings() {
   useEffect(() => {
     listAiProviders().then(setAiProviders)
   }, [])
+
+  // ===== Счётчик бюджета подсказки whisper =====
+  // Считает БЭКЕНД токенизатором выбранной модели (count_prompt_tokens), а не
+  // формула по длине здесь: замер на живой модели дал от 1.5 символа на токен
+  // (список аббревиатур) до 6.2 (связная английская фраза), и прежняя оценка
+  // «длина/3.5» промахивалась вдвое в обе стороны — на кириллице ещё и
+  // по-разному на двух сторонах приложения. Второй оценки в проекте больше
+  // нет: число приходит оттуда же, откуда придёт настоящая расшифровка.
+  const dictionary = s?.dictionary ?? ''
+  const settingsLoaded = s !== null
+  const [budget, setBudget] = useState<PromptBudget | null>(null)
+  const [budgetError, setBudgetError] = useState('')
+
+  useEffect(() => {
+    if (!settingsLoaded) return
+    let alive = true
+    // Пауза перед счётом: поле зеркалит документ на каждый символ (см.
+    // DictionaryField), а первый счёт может ещё и загружать модель.
+    const timer = setTimeout(() => {
+      countPromptTokens(dictionary)
+        .then((fresh) => {
+          if (!alive) return
+          setBudget(fresh)
+          setBudgetError('')
+        })
+        .catch((e) => {
+          if (!alive) return
+          setBudget(null)
+          setBudgetError(String(e))
+        })
+    }, 400)
+    return () => {
+      // Гонка ответов: правка словаря отменяет и таймер, и применение уже
+      // улетевшего ответа — иначе медленный первый счёт (с загрузкой модели)
+      // мог бы приехать поверх более свежего.
+      alive = false
+      clearTimeout(timer)
+    }
+  }, [dictionary, settingsLoaded])
 
   if (!s) return <div className="settings chassis chassis-flush">Loading…</div>
 
@@ -501,11 +541,7 @@ export function Settings() {
     </>
   )
 
-  // Оценка занятого бюджета подсказки whisper — считается на каждый рендер
-  // из актуального значения поля (разбор шести сотен символов, мемоизация
-  // здесь была бы дороже самого счёта).
-  const dictionaryTokens = estimatePromptTokens(s.dictionary)
-  const dictionaryOverBudget = dictionaryTokens > MAX_PROMPT_TOKENS
+  const dictionaryOverBudget = budget?.tokens != null && budget.tokens > budget.max
 
   const recognitionSection = (
     <>
@@ -563,15 +599,23 @@ export function Settings() {
       </p>
       {/* Счётчик бюджета — единственное, что стоит между пользователем и
           тихой потерей терминов: whisper.cpp режет подсказку по 224 токенам
-          С НАЧАЛА списка и молча (см. prompt-budget.ts). Показан всегда, а не
-          только при переполнении: «сколько осталось» нужно знать ДО того, как
-          дописал лишнее, а не после. */}
-      <p className={`hint dictionary-budget${dictionaryOverBudget ? ' err' : ''}`}>
-        {dictionaryOverBudget
-          ? `Over the prompt budget: about ${dictionaryTokens} of ${MAX_PROMPT_TOKENS} tokens. ` +
-            'Whisper cuts the prompt down to size from the top of the list, without saying so — ' +
-            'the terms written first would stop being suggested. Shorten the list.'
-          : `Prompt budget: about ${dictionaryTokens} of ${MAX_PROMPT_TOKENS} tokens used.`}
+          С НАЧАЛА списка и молча. Показан всегда, а не только при
+          переполнении: «сколько осталось» нужно знать ДО того, как дописал
+          лишнее, а не после. Число — не оценка: его считает токенизатор самой
+          модели (см. count_prompt_tokens). */}
+      <p className={`hint dictionary-budget${dictionaryOverBudget || budgetError ? ' err' : ''}`}>
+        {budgetError
+          ? budgetError
+          : budget === null
+            ? 'Prompt budget: counting…'
+            : budget.tokens === null
+              ? 'Prompt budget: needs a model — the count comes from the tokenizer of the model ' +
+                'you transcribe with. Download one in Models.'
+              : dictionaryOverBudget
+                ? `Over the prompt budget: ${budget.tokens} of ${budget.max} tokens. ` +
+                  'Whisper cuts the prompt down to size from the top of the list, without saying ' +
+                  'so — the terms written first would stop being suggested. Shorten the list.'
+                : `Prompt budget: ${budget.tokens} of ${budget.max} tokens used.`}
       </p>
     </>
   )

@@ -36,6 +36,19 @@ pub fn clamp_vad_threshold(threshold: f32) -> f32 {
     )
 }
 
+/// Потолок подсказки: whisper.cpp берёт из `initial_prompt` не больше
+/// `n_text_ctx/2` токенов (whisper.cpp: `std::min(n_max_text_ctx,
+/// whisper_n_text_ctx(ctx)/2)`), а `n_text_ctx` у всех моделей 448. Лишнее
+/// отбрасывается С НАЧАЛА списка и молча: длинный словарь не расширяет охват,
+/// а тихо теряет первые термины.
+pub const MAX_PROMPT_TOKENS: usize = 224;
+
+/// Запас на пробное токенизирование: `whisper_tokenize` пишет в буфер
+/// фиксированного размера и отдаёт -1, если не поместилось. Шестьдесят
+/// четыре бюджета — заведомо больше любого осмысленного словаря; всё, что
+/// длиннее, и так далеко за потолком, и точное число там уже не нужно.
+const TOKENIZE_PROBE_LIMIT: usize = MAX_PROMPT_TOKENS * 64;
+
 /// Собирает `initial_prompt` из словаря терминов пользователя.
 ///
 /// Зачем это вообще: человек диктует по-русски и вставляет английские
@@ -83,6 +96,28 @@ impl Transcriber {
         let ctx = WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
         .context("Couldn't load the whisper model. Try downloading it again in Settings.")?;
         Ok(Self { ctx })
+    }
+
+    /// Сколько токенов занимает текст у токенизатора ЭТОЙ модели.
+    ///
+    /// Почему это единственный честный ответ. Токенизатор whisper — байтовый
+    /// BPE, и «символов на токен» у него не константа, а функция от письма и
+    /// регистра: замер на реальной модели (см. `prompt_token_estimate...`
+    /// ниже и отчёт) даёт от 1.5 символов на токен на списке аббревиатур до
+    /// 6.2 на связной английской фразе — разброс вчетверо. Любая оценка «по
+    /// длине» либо врёт вдвое вниз на одних словарях, либо вдвое вверх на
+    /// других; оба направления одинаково бесполезны рядом с потолком в 224.
+    ///
+    /// Ошибка — только если текст не поместился в пробный буфер
+    /// (`TOKENIZE_PROBE_LIMIT`) или содержит NUL; и то и другое означает
+    /// словарь, который в подсказку не влезет в любом случае.
+    pub fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+        self.ctx
+            .tokenize(text, TOKENIZE_PROBE_LIMIT)
+            .map(|tokens| tokens.len())
+            .map_err(|e| {
+                anyhow!("Dictionary is too long to count — shorten it. ({e})")
+            })
     }
 
     /// `pcm` должен быть f32, 16 кГц, моно, УЖЕ усиленный (см.
@@ -139,6 +174,17 @@ impl Transcriber {
         // set_initial_prompt копирует строку в свой CString (whisper-rs
         // 0.16), поэтому одолжённая &str переживать вызов не обязана.
         if let Some(prompt) = initial_prompt {
+            // Единственное место, где ВИДНО, что подсказка не влезла: токены
+            // считает та же модель, которая сейчас будет расшифровывать.
+            // В лог идут только числа — сам словарь это тоже личные данные.
+            match self.count_tokens(prompt) {
+                Ok(n) if n > MAX_PROMPT_TOKENS => eprintln!(
+                    "словарь: {n} токенов при потолке {MAX_PROMPT_TOKENS} — whisper отбросит {} с начала списка",
+                    n - MAX_PROMPT_TOKENS
+                ),
+                Ok(_) => {}
+                Err(e) => eprintln!("словарь: посчитать токены не удалось: {e}"),
+            }
             params.set_initial_prompt(prompt);
         }
 
@@ -306,6 +352,109 @@ mod tests {
         assert_eq!(
             clamp_vad_threshold(f32::NAN),
             crate::settings::DEFAULT_VAD_THRESHOLD
+        );
+    }
+
+    /// ЗАМЕР НА ЖИВОМ ТОКЕНИЗАТОРЕ. Тест, ради которого счётчик бюджета
+    /// перестал быть оценкой по длине. Печатает по каждому представительному
+    /// словарю: символы, байты, реальные токены и обе прежние оценки —
+    /// «байты/3.5» (так считал Rust) и «символы/3.5» (так считал фронтенд).
+    ///
+    /// Проверяет он ровно одно утверждение, которое нельзя вывести
+    /// рассуждением: обе прежние оценки промахиваются, причём в РАЗНЫЕ
+    /// стороны, и ни одна не годится в предупреждение. Числа замера — в
+    /// отчёте .superpowers/sdd/2026-09-09-slaive-v1-voice-overlay/.
+    ///
+    /// Запуск (модель любая, счёт зависит от её словаря):
+    /// SLAIVE_MODEL="$HOME/Library/Application Support/net.slaive.app/models/ggml-large-v3-turbo.bin" \
+    ///   PATH="$HOME/.cargo/bin:$PATH" cargo test prompt_token -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn prompt_token_length_estimates_are_wrong_in_both_directions() {
+        let path = std::env::var("SLAIVE_MODEL").expect("задай SLAIVE_MODEL");
+        let t = Transcriber::load(std::path::Path::new(&path)).unwrap();
+
+        let ru_terms = "коммит\nветка\nоткат\nразвёртывание\nочередь\nиндекс\n\
+хранилище\nнагрузка\nотказоустойчивость\nмикросервис\nпроизводительность\n\
+обновление\nсогласованность\nбалансировщик\nподписка\nшифрование";
+        let mixed = "React\nкоммит\nKubernetes\nветка\nDocker\nразвёртывание\n\
+pull request\nочередь\nTypeScript\nотказоустойчивость";
+        let acronyms = "JWT\nCORS\nGKE\nIAM\nSSO\nCRDT\nHSTS\nBPE\nRPC\nUUID\nTTL\nACL\nSLA\nSLO";
+
+        // Словарь, на котором прежние оценки ЗАНИЖАЮТ счёт: это и есть
+        // опасное направление — предупреждение не показывается, а термины
+        // из начала списка уже отброшены.
+        let mut too_low = Vec::new();
+        // И словарь, на котором Rust-оценка ЗАВЫШАЕТ вдвое: пугает там, где
+        // места ещё половина.
+        let mut too_high = Vec::new();
+
+        for (name, dict) in [
+            ("EN seed", crate::settings::DEFAULT_DICTIONARY),
+            ("RU terms", ru_terms),
+            ("mixed", mixed),
+            ("EN acronyms", acronyms),
+        ] {
+            let prompt = initial_prompt(dict).expect("словарь не пуст");
+            let real = t.count_tokens(&prompt).expect("токенизация словаря");
+            let chars = prompt.chars().count();
+            let bytes = prompt.len();
+            let est_bytes = (bytes as f32 / 3.5).ceil() as usize;
+            let est_chars = (chars as f32 / 3.5).ceil() as usize;
+            println!(
+                "{name:12} chars={chars:4} bytes={bytes:4} tokens={real:4} \
+chars/tok={:.2} прежняя оценка Rust (байты/3.5)={est_bytes:4} фронтенда (символы/3.5)={est_chars:4}",
+                chars as f32 / real as f32,
+            );
+            if est_chars < real {
+                too_low.push(name);
+            }
+            if est_bytes as f32 > real as f32 * 1.4 {
+                too_high.push(name);
+            }
+        }
+
+        assert!(
+            !too_low.is_empty(),
+            "оценка по символам обязана где-то занижать — иначе замер не воспроизвёлся: {too_low:?}"
+        );
+        assert!(
+            !too_high.is_empty(),
+            "оценка по байтам обязана где-то сильно завышать: {too_high:?}"
+        );
+        println!("занижают: {too_low:?}; сильно завышают: {too_high:?}");
+    }
+
+    /// Потолок подсказки — не выдумка: он выводится из `n_text_ctx` самой
+    /// модели, и если whisper.cpp когда-нибудь изменит контекст, число здесь
+    /// обязано разойтись с моделью громко, а не остаться жить в комментарии.
+    #[test]
+    #[ignore]
+    fn max_prompt_tokens_is_half_the_model_text_context() {
+        let path = std::env::var("SLAIVE_MODEL").expect("задай SLAIVE_MODEL");
+        let ctx = whisper_rs::WhisperContext::new_with_params(
+            &path,
+            whisper_rs::WhisperContextParameters::default(),
+        )
+        .unwrap();
+        assert_eq!(ctx.n_text_ctx() as usize / 2, MAX_PROMPT_TOKENS);
+    }
+
+    /// Сид словаря против РЕАЛЬНОГО токенизатора. Прежняя версия этого теста
+    /// жила в settings.rs и считала «байты/3.5» — на сиде это 181 токен при
+    /// настоящих 192, то есть тест защищал не тот запас, который думал.
+    #[test]
+    #[ignore]
+    fn default_dictionary_fits_the_prompt_budget() {
+        let path = std::env::var("SLAIVE_MODEL").expect("задай SLAIVE_MODEL");
+        let t = Transcriber::load(std::path::Path::new(&path)).unwrap();
+        let prompt = initial_prompt(crate::settings::DEFAULT_DICTIONARY).unwrap();
+        let real = t.count_tokens(&prompt).unwrap();
+        println!("сид словаря: {real} токенов из {MAX_PROMPT_TOKENS}");
+        assert!(
+            real <= MAX_PROMPT_TOKENS,
+            "сид занимает {real} токенов при потолке {MAX_PROMPT_TOKENS}: \
+whisper отбросит начало списка молча"
         );
     }
 
