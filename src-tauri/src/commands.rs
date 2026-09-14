@@ -1447,14 +1447,26 @@ pub fn register_capture_hotkey(app: &AppHandle, hotkey: &str) -> anyhow::Result<
         anyhow::anyhow!("Couldn't parse capture hotkey combination \"{hotkey}\": {e}.")
     })?;
 
+    let gs = app.global_shortcut();
+
+    // То же короткое замыкание, что в try_register_hotkey: комбинация не
+    // изменилась и уже активна — снимать и перевешивать нечего. Без этого
+    // save_settings, вызывая эту функцию безусловно на КАЖДОЕ сохранение
+    // (даже смену прозрачности окна или выбор ИИ-провайдера, не только смену
+    // capture_hotkey), на мгновение снимал бы и тут же вешал заново живой
+    // глобальный хоткей — и это окно теперь не существует вовсе, а не просто
+    // мало заметно.
+    if gs.is_registered(shortcut) {
+        return Ok(());
+    }
+
     let state = app.state::<AppState>();
     if let Some(old) = state.current_capture_hotkey.lock().unwrap().take() {
-        let _ = app.global_shortcut().unregister(old);
+        let _ = gs.unregister(old);
     }
 
     let handle = app.clone();
-    app.global_shortcut()
-        .on_shortcut(shortcut, move |_app, _shortcut, event| {
+    gs.on_shortcut(shortcut, move |_app, _shortcut, event| {
             // Только на нажатие: иначе команда выполнится дважды за одно
             // срабатывание — и отпускание тоже полезет копировать.
             if event.state() != ShortcutState::Pressed {
