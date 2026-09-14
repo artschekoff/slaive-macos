@@ -91,6 +91,40 @@ pub fn send_paste() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Посылает Cmd+C активному приложению. Полный двойник `send_paste` — те же
+/// источник события, тап и флаг на key-up, отличается только код клавиши.
+///
+/// Зачем вообще нажатие, а не чтение выделения напрямую: на macOS прочитать
+/// выделение в чужом приложении нечем. Системное меню «Службы» работает ровно
+/// так же — посылает копирование и читает буфер обмена.
+#[allow(dead_code)]
+pub fn send_copy() -> anyhow::Result<()> {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow!("couldn't create a CGEventSource"))?;
+
+    // ANSI_C = 8 — код физической позиции клавиши, а не буквы «C»: на любой
+    // раскладке копирование висит на этой позиции (см. тот же довод про
+    // ANSI_V в send_paste).
+    let key_down = CGEvent::new_keyboard_event(source.clone(), KeyCode::ANSI_C, true)
+        .map_err(|_| anyhow!("couldn't create the Cmd+C key-down event"))?;
+    key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+
+    let key_up = CGEvent::new_keyboard_event(source, KeyCode::ANSI_C, false)
+        .map_err(|_| anyhow!("couldn't create the Cmd+C key-up event"))?;
+    // Флаг Cmd обязателен и на key-up: без него модификатор залипает
+    // нажатым до следующего настоящего нажатия Cmd.
+    key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+
+    key_down.post(CGEventTapLocation::HID);
+    key_up.post(CGEventTapLocation::HID);
+
+    // ponytail: как и send_paste, узнать об отказе из-за отсутствия прав
+    // отсюда нельзя — CGEventPost молчит. Право проверяется до вызова через
+    // has_accessibility_permission(); усложнить, если появится способ
+    // получить подтверждение доставки события.
+    Ok(())
+}
+
 // Единственный достоверный способ узнать, есть ли право на отправку нажатий.
 // Разбор текста ошибки уже подвёл: реальное сообщение macOS оказалось
 // "not allowed to send keystrokes (1002)" и не совпало ни с одним из
@@ -533,5 +567,16 @@ mod tests {
         println!("resolve_app({pid}) = {result:?}");
         assert!(result.is_some());
         assert!(!result.unwrap().name.is_empty());
+    }
+
+    // Отправка нажатия требует права Accessibility и живого рабочего стола,
+    // поэтому проверяем не эффект, а то, что функция собирает событие и не
+    // падает. Тест помечен ignore: на машине без прав CGEventPost молча
+    // отбрасывает событие, а с правами — отправит настоящий Cmd+C в активное
+    // приложение, чего в тестах делать нельзя.
+    #[test]
+    #[ignore = "постит настоящее нажатие в активное приложение"]
+    fn send_copy_builds_an_event() {
+        assert!(send_copy().is_ok());
     }
 }
