@@ -42,8 +42,18 @@ bump:
 	@test -n "$(TO)" || { echo "Укажи версию: make bump TO=0.2.0"; exit 1; }
 	@python3 scripts/bump-version.py $(TO)
 
-# Релиз. Порядок шагов важен: сначала отказы на грязном дереве и неотправленных
-# коммитах, потом проверки, и только затем что-то необратимое — тег и публикация.
+# Релиз. Порядок шагов важен по двум причинам.
+#
+# Первая: сначала отказы на грязном дереве и неотправленных коммитах, потом
+# проверки, и только затем необратимое — тег и публикация.
+#
+# Вторая: СБОРКА ИДЁТ ДО КОММИТА ВЕРСИИ, и переставлять их нельзя.
+# bump-version.py правит Cargo.toml, но не Cargo.lock — блокировку
+# пересчитывает сам cargo, и делает это при сборке. Если коммитить до сборки,
+# Cargo.lock остаётся со старой версией, обновляется на следующем шаге и
+# повисает в дереве грязным. Внешне ничего не ломается, релиз выходит верным —
+# но СЛЕДУЮЩИЙ make release упрётся в собственную проверку «дерево грязное»,
+# и причина будет неочевидна: пользователь ничего не менял.
 release:
 	@set -e; \
 	git diff --quiet && git diff --cached --quiet || { echo "Дерево грязное — закоммить или спрячь изменения."; exit 1; }; \
@@ -71,12 +81,12 @@ release:
 	read confirm; \
 	case $$confirm in [yY]*) ;; *) echo "Отменено."; exit 1 ;; esac; \
 	$(MAKE) bump TO=$$plain; \
-	git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock; \
-	git commit -m "chore: версия $$new"; \
-	git push; \
 	$(MAKE) build; \
 	dmg=$$(ls $(DMG_DIR)/Slaive_$${plain}_aarch64.dmg); \
 	test -f "$$dmg" || { echo "Образ $$dmg не собрался."; exit 1; }; \
+	git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock; \
+	git commit -m "chore: версия $$new"; \
+	git push; \
 	git tag $$new; \
 	git push origin $$new; \
 	gh release create $$new "$$dmg" \
