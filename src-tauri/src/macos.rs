@@ -91,6 +91,71 @@ pub fn send_paste() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Сколько ждём, пока пользователь отпустит модификаторы своего хоткея.
+/// Обычный тап по комбинации укладывается в десятки миллисекунд; дольше
+/// ждать нечего — послать нажатие как есть лучше, чем не послать вовсе.
+const MODIFIER_RELEASE_DEADLINE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Шаг опроса — по тем же соображениям, что у опроса счётчика буфера обмена
+/// в `capture.rs`: мельче не даёт ничего, кроме нагрузки.
+const MODIFIER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    /// Состояние модификаторов, как его видит система прямо сейчас.
+    /// Возвращаемый тип объявлен как `u64`, а не `CGEventFlags`: у битфлагов
+    /// из крейта нет обещанного представления для FFI, а разрядность здесь
+    /// известна и не меняется.
+    fn CGEventSourceFlagsState(state_id: CGEventSourceStateID) -> u64;
+}
+
+/// Какие модификаторы физически зажаты прямо сейчас. CombinedSessionState —
+/// состояние всей сессии, то есть и настоящая клавиатура, и уже посланные
+/// нами события; ровно то, с чем система объединит наше нажатие.
+fn hardware_modifier_flags() -> CGEventFlags {
+    CGEventFlags::from_bits_truncate(unsafe {
+        CGEventSourceFlagsState(CGEventSourceStateID::CombinedSessionState)
+    })
+}
+
+/// Помешает ли текущее состояние модификаторов отправке Cmd+C.
+///
+/// Command не мешает: он и так часть посылаемого сочетания, и лишним битом
+/// не станет. Всё остальное приложение увидит СВЕРХ нашего флага, а
+/// Ctrl+Cmd+C или Shift+Cmd+C — это уже не «копировать».
+fn modifiers_block_copy(flags: CGEventFlags) -> bool {
+    flags.intersects(
+        CGEventFlags::CGEventFlagControl
+            | CGEventFlags::CGEventFlagAlternate
+            | CGEventFlags::CGEventFlagShift
+            | CGEventFlags::CGEventFlagSecondaryFn,
+    )
+}
+
+/// Ждёт, пока лишние модификаторы не отпустят, но не дольше предельного
+/// времени. `false` — не дождались и посылаем как есть.
+///
+/// ponytail: ждём вместо того, чтобы чистить флаги у самого события. Погасить
+/// чужой модификатор можно только послав за него flagsChanged, то есть соврав
+/// системе о состоянии настоящей клавиатуры, — а это ломает всё, что читает
+/// модификаторы, пока пользователь держит их зажатыми. Усложнять, если
+/// найдётся приложение, ради которого ожидание окажется слишком долгим.
+fn wait_for_quiet_modifiers() -> bool {
+    let mut waited = std::time::Duration::ZERO;
+    while modifiers_block_copy(hardware_modifier_flags()) {
+        if waited >= MODIFIER_RELEASE_DEADLINE {
+            return false;
+        }
+        let step = std::cmp::min(
+            MODIFIER_POLL_INTERVAL,
+            MODIFIER_RELEASE_DEADLINE - waited,
+        );
+        std::thread::sleep(step);
+        waited += step;
+    }
+    true
+}
+
 /// Посылает Cmd+C активному приложению. Полный двойник `send_paste` — те же
 /// источник события, тап и флаг на key-up, отличается только код клавиши.
 ///
@@ -98,6 +163,13 @@ pub fn send_paste() -> anyhow::Result<()> {
 /// выделение в чужом приложении нечем. Системное меню «Службы» работает ровно
 /// так же — посылает копирование и читает буфер обмена.
 pub fn send_copy() -> anyhow::Result<()> {
+    // Отличие от send_paste, и единственное: к моменту вставки хоткей записи
+    // давно отпущен, а захват срабатывает на НАЖАТИЕ своего хоткея — Ctrl и
+    // Cmd в эту секунду физически зажаты. HIDSystemState — то же состояние
+    // модификаторов, что у настоящей клавиатуры, и целевое приложение рискует
+    // увидеть Ctrl+Cmd+C вместо Cmd+C, то есть не скопировать ничего.
+    wait_for_quiet_modifiers();
+
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow!("couldn't create a CGEventSource"))?;
 
@@ -592,6 +664,44 @@ mod tests {
     #[ignore = "постит настоящее нажатие в активное приложение"]
     fn send_copy_builds_an_event() {
         assert!(send_copy().is_ok());
+    }
+
+    /// Хоткей захвата срабатывает на НАЖАТИЕ, то есть его модификаторы в этот
+    /// момент зажаты. Посланный тогда Cmd+C доедет до приложения как
+    /// Ctrl+Cmd+C — другое сочетание, и копирования не будет.
+    #[test]
+    fn a_held_control_blocks_the_copy() {
+        assert!(modifiers_block_copy(
+            CGEventFlags::CGEventFlagControl | CGEventFlags::CGEventFlagCommand
+        ));
+        assert!(modifiers_block_copy(CGEventFlags::CGEventFlagShift));
+        assert!(modifiers_block_copy(CGEventFlags::CGEventFlagAlternate));
+    }
+
+    /// А вот зажатый Command ждать не заставляет: он и так часть того
+    /// сочетания, которое мы посылаем, и лишним битом не станет. Иначе
+    /// пользователь, не отпустивший Cmd, ждал бы все 300 мс на ровном месте.
+    #[test]
+    fn a_held_command_alone_does_not_block_the_copy() {
+        assert!(!modifiers_block_copy(CGEventFlags::CGEventFlagCommand));
+        assert!(!modifiers_block_copy(CGEventFlags::CGEventFlagNull));
+        // NumericPad и CapsLock прилетают вместе с обычным вводом и к
+        // сочетанию отношения не имеют.
+        assert!(!modifiers_block_copy(
+            CGEventFlags::CGEventFlagNumericPad | CGEventFlags::CGEventFlagAlphaShift
+        ));
+    }
+
+    /// Ожидание не может длиться дольше объявленного предела: захват и без
+    /// того тратит до полусекунды на опрос счётчика буфера обмена.
+    #[test]
+    fn waiting_for_modifiers_is_bounded() {
+        let started = std::time::Instant::now();
+        wait_for_quiet_modifiers();
+        assert!(
+            started.elapsed() <= MODIFIER_RELEASE_DEADLINE + std::time::Duration::from_millis(100),
+            "ожидание модификаторов длилось дольше предельного времени"
+        );
     }
 
     // Счётчик не обязан иметь какое-то конкретное значение — он растёт при

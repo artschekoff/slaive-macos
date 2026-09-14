@@ -1735,26 +1735,27 @@ button.primary {
 /* Кнопка настроек — та же геометрия и материал, что у .overlay-close, но
    левее на свою ширину плюс зазор. Отдельное правило, а не общий класс:
    различаются только координата и символ, и общий класс на две кнопки
-   потребовал бы модификатора, что длиннее самого правила. */
+   потребовал бы модификатора, что длиннее самого правила.
+
+   «Тот же материал» здесь буквально: background и border не переопределяются
+   вовсе, а наследуются от `.chassis button` — как у соседа. Плоская заливка
+   поверх глянцевого градиента оставляла бы этой кнопке inset-блик и тени
+   соседа без его же поверхности, и две кнопки в одном углу не совпали бы.
+   Нажатие тоже общее (`.chassis button:not(:disabled):active`), своего
+   :hover нет по той же причине: у .overlay-close его нет. */
 .overlay .overlay-settings {
   position: absolute;
   top: 8px;
   right: 34px;
   width: 20px;
   height: 20px;
+  padding: 0;
   border-radius: 10px;
   display: grid;
   place-items: center;
   font-size: 11px;
   line-height: 1;
-  color: #8e8e93;
-  background: rgba(255, 255, 255, 0.06);
-  border: none;
-  cursor: pointer;
-  padding: 0;
-}
-
-.overlay .overlay-settings:hover {
-  color: #f2f2f7;
-  background: rgba(255, 255, 255, 0.12);
+  /* Ниже модального слоя прав (z-index 10) и на одном уровне с соседом —
+     см. тот же z-index у .overlay-close выше. */
+  z-index: 2;
 }

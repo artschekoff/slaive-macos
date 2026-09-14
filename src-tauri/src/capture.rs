@@ -34,8 +34,9 @@ pub trait CaptureOps {
 pub struct CaptureOutcome {
     /// Выделенный текст, уже обрезанный по краям.
     pub text: String,
-    /// Удалось ли вернуть прежнее содержимое буфера обмена. `false` означает,
-    /// что возвращать было нечего либо там лежал не текст.
+    /// Удалось ли вернуть прежнее содержимое буфера обмена. `false` означает
+    /// одно из трёх: возвращать было нечего, там лежал не текст, либо запись
+    /// обратно не удалась — и тогда в буфере осталось захваченное выделение.
     pub restored_clipboard: bool,
 }
 
@@ -133,8 +134,12 @@ pub fn capture_selection<O: CaptureOps>(ops: &O) -> anyhow::Result<CaptureOutcom
     // одними пробелами, но чужое содержимое всё равно наше не по праву.
     let restored_clipboard = match &previous {
         Some(old) => {
-            ops.write_text(old)?;
-            true
+            // Сбой записи наверх не пробрасываем. Выделение уже захвачено, и
+            // ошибка вместо результата отняла бы у пользователя и текст, и
+            // буфер сразу. Сказать честное `false` — единственное обещание,
+            // которое здесь ещё можно сдержать: в буфере осталось не его
+            // содержимое, и вызывающая сторона об этом знает.
+            ops.write_text(old).is_ok()
         }
         None => false,
     };
@@ -167,6 +172,8 @@ mod tests {
         copied: Option<String>,
         writes: RefCell<Vec<String>>,
         slept: RefCell<Duration>,
+        /// Буфер обмена не принимает запись — занят другим процессом.
+        write_fails: bool,
     }
 
     impl Fake {
@@ -178,7 +185,13 @@ mod tests {
                 copied: copied.map(String::from),
                 writes: RefCell::new(Vec::new()),
                 slept: RefCell::new(Duration::ZERO),
+                write_fails: false,
             }
+        }
+
+        fn with_failing_writes(mut self) -> Self {
+            self.write_fails = true;
+            self
         }
     }
 
@@ -204,6 +217,9 @@ mod tests {
 
         fn write_text(&self, text: &str) -> anyhow::Result<()> {
             self.writes.borrow_mut().push(text.to_string());
+            if self.write_fails {
+                return Err(anyhow!("буфер обмена занят другим процессом"));
+            }
             *self.clipboard.borrow_mut() = Some(text.to_string());
             Ok(())
         }
@@ -279,6 +295,21 @@ mod tests {
         assert!(err.contains("No text selected"), "получено: {err}");
     }
 
+
+    #[test]
+    fn a_failed_restore_does_not_swallow_the_captured_text() {
+        // Буфер обмена мог не принять запись (его держит другой процесс).
+        // Отдать ошибку вместо текста значило бы отнять у пользователя и
+        // выделение, и буфер разом; вместо этого честно сообщаем, что
+        // восстановить не вышло.
+        let ops = Fake::new(Some(1), Some("старое"), Some("выделенное")).with_failing_writes();
+        let out = capture_selection(&ops).expect("захват не должен падать из-за сбоя записи");
+        assert_eq!(out.text, "выделенное");
+        assert!(
+            !out.restored_clipboard,
+            "неудавшееся восстановление отчиталось как удавшееся"
+        );
+    }
 
     #[test]
     fn the_gate_refuses_a_second_holder_and_releases_afterwards() {

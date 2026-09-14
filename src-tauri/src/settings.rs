@@ -66,7 +66,6 @@ pub struct Settings {
     /// Глобальный хоткей захвата выделенного текста. Как и `hotkey`,
     /// регистрируется системно, поэтому перехватывает комбинацию во всех
     /// приложениях сразу.
-    #[serde(default = "default_capture_hotkey")]
     pub capture_hotkey: String,
     /// Абсолютный путь к файлу модели ggml-*.bin.
     pub model_path: Option<PathBuf>,
@@ -220,10 +219,6 @@ pub struct Settings {
 /// поле пусто (см. `translate_languages`). Дублируется на фронтенде
 /// (DEFAULT_TRANSLATE_LANGUAGES в src/action-tree.ts) ровно как остальные
 /// дефолты: там это заглушка до первого ответа get_settings.
-fn default_capture_hotkey() -> String {
-    "Ctrl+Super+Space".to_string()
-}
-
 pub const DEFAULT_TRANSLATE_LANGUAGES: &str = "English, Spanish, Russian";
 
 pub const DEFAULT_DICTIONARY: &str = "commit\n\
@@ -297,6 +292,14 @@ ECS\n\
 EKS\n\
 Fargate\n\
 CloudWatch";
+
+/// Дефолтный хоткей захвата — Ctrl+Cmd+Space. Функция, а не константа,
+/// потому что `Default for Settings` ниже собирает `String`, и это её
+/// единственный потребитель: `#[serde(default)]` на всей структуре уже
+/// берёт значение оттуда же.
+fn default_capture_hotkey() -> String {
+    "Ctrl+Super+Space".to_string()
+}
 
 impl Default for Settings {
     fn default() -> Self {

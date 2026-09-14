@@ -55,6 +55,11 @@ const DEFAULT_MAIN_PASTE_SHORTCUT = 'Super+Enter'
 
 type FollowPayload = { text: string }
 
+// Подписи строки с Undo. Две, потому что причины замены разные, и «откуда
+// взялся этот текст» — единственное, что здесь нужно объяснить.
+const HISTORY_NOTICE = 'Loaded from history. The text that was here has been replaced.'
+const NEW_TEXT_NOTICE = 'New text arrived. The text that was here has been replaced.'
+
 /** Главное окно: текст сверху (неподвижная часть интерфейса — см. бриф), под
  *  ним многоуровневое меню действий (Translate/Ask AI/Fix/Shorten/Summarize), каждое
  *  из которых уходит в ИИ-провайдер через run_ai_action ТОЛЬКО по явному
@@ -107,10 +112,15 @@ export function MainWindow() {
   // это неподвижная часть интерфейса (бриф главного окна), и видеть, что
   // именно будет заменено, полезнее, чем на секунду её прятать.
   const [showHistory, setShowHistory] = useState(false)
-  // Что лежало в редакторе ДО того, как туда положили запись из истории.
-  // Замена текста задумана (история — способ вернуться к прежней расшифровке,
-  // а не дописать к текущей), но человек мог полчаса править надиктованное
-  // руками, и «задумано» не оправдывает молчаливую потерю этой работы.
+  // Что лежало в редакторе ДО того, как туда положили другой текст: запись из
+  // истории или новый текст извне (диктовка по Follow, захват выделения по
+  // глобальному хоткею). Замена задумана в обоих случаях, но человек мог
+  // полчаса править надиктованное руками, и «задумано» не оправдывает
+  // молчаливую потерю этой работы.
+  //
+  // С приходом захвата это перестало быть краем: раньше чужой текст попадал
+  // сюда только по явному нажатию Follow, а теперь — по глобальному хоткею,
+  // из любого приложения, когда главное окно даже не на виду.
   //
   // Спрашивать подтверждение перед каждой заменой нельзя: текст в редакторе
   // есть почти всегда (в это окно иначе и не попадают), диалог выскакивал бы
@@ -124,7 +134,9 @@ export function MainWindow() {
   // знать, он требует normal-режима и фокуса в поле, и проверить его можно
   // только руками в живом приложении. Собственный снимок работает по
   // построению.
-  const [replacedText, setReplacedText] = useState<string | null>(null)
+  // Текст и подпись едут вместе: две разные причины замены объясняются
+  // по-разному, а расходиться между собой они не должны.
+  const [replaced, setReplaced] = useState<{ text: string; message: string } | null>(null)
 
   // Хоткеи действий — ОКОННЫЕ, не глобальные (см. action-shortcuts.ts):
   // обычный keydown ниже, никакого tauri-plugin-global-shortcut. В состоянии,
@@ -193,6 +205,16 @@ export function MainWindow() {
   // перезаписал текст, к которому он уже не относится (см. apply-state.ts).
   const requestIdRef = useRef(0)
 
+  // Зеркало applyState для обработчика follow:text: подписка вешается один
+  // раз (deps []), и обычная переменная состояния в её замыкании навсегда
+  // осталась бы первой, то есть idle, — а решать надо по текущей фазе.
+  // Синхронизируем эффектом, а не присваиванием в теле рендера: эффекты
+  // успевают отработать до любого события из Tauri.
+  const applyStateRef = useRef(applyState)
+  useEffect(() => {
+    applyStateRef.current = applyState
+  }, [applyState])
+
   useEffect(() => {
     const parent = editorContainerRef.current
     if (!parent) return
@@ -209,28 +231,40 @@ export function MainWindow() {
     }
   }, [])
 
-  // Follow из оверлея — единственный способ получить текст в это окно. Новый
-  // текст — новый цикл: меню в корень, состояние применения сброшено, форма
-  // Ask AI очищена — тот же принцип "новый цикл, чистый лист", что у
+  // Текст извне: Follow из оверлея и захват выделения по глобальному хоткею.
+  // Новый текст — новый цикл: меню в корень, состояние применения сброшено,
+  // форма Ask AI очищена — тот же принцип "новый цикл, чистый лист", что у
   // rec:start в Overlay.tsx. Приходит и когда окно только что показано Rust'ом
   // (show_main_window), и когда оно уже было открыто и просто поднимается
   // наверх — в обоих случаях второе окно не плодится (см. follow_to_main_window).
   useEffect(() => {
     const un = listen<FollowPayload>('follow:text', (e) => {
       const view = viewRef.current
+      const previous = view?.state.doc.toString() ?? ''
+      // Запрос к ИИ, запущенный для ПРЕЖНЕГО текста, к новому отношения не
+      // имеет: applyState сейчас сбросится, и ответу будет некуда лечь.
+      // Рвём его, а не оставляем идти вхолостую до конца — за него платят.
+      // При phase==='proposed' ответ уже пришёл, будить некого (notify_waiters
+      // на стороне Rust безопасен, когда никто не ждёт), — то же решение,
+      // что у onCancel ниже.
+      if (applyStateRef.current.phase === 'pending') void cancelAiAction()
       if (view) resetEditorContent(view, e.payload.text)
       setMenuState(rootMenuState(actionTreeRef.current))
       setApplyState(idleApplyState())
       setActionError(null)
       setPromptQuery('')
-      // Новый текст — новый цикл: история закрывается, а предложение вернуть
-      // прежний текст теряет смысл (прежний текст только что заменён не
-      // историей, а новой диктовкой).
+      // Новый текст — новый цикл: история закрывается.
       setShowHistory(false)
-      setReplacedText(null)
-      // Текст новый — возможно, и приложение, из которого его надиктовали,
-      // тоже другое. Шапку и доступность Paste перечитываем на каждый Follow,
-      // а не один раз на монтировании.
+      // А вот прежний текст не теряется. До захвата сюда попадали только по
+      // явному нажатию Follow, то есть намеренно; теперь текст прилетает по
+      // глобальному хоткею из чужого приложения, и в редакторе в этот момент
+      // могут лежать получасовые правки или предложение модели на экране.
+      // Строка с Undo — та же гарантия и тот же побайтовый откат, что у
+      // замены из истории; терять было нечего только у пустого редактора.
+      setReplaced(previous.trim() ? { text: previous, message: NEW_TEXT_NOTICE } : null)
+      // Текст новый — возможно, и приложение, из которого он пришёл, тоже
+      // другое. Шапку и доступность Paste перечитываем на каждый приход
+      // текста, а не один раз на монтировании.
       refreshSourceApp()
     })
     return () => {
@@ -264,9 +298,9 @@ export function MainWindow() {
     setApplyState(startRequest(original, id))
     setActionError(null)
     // С текстом начали работать — предложение вернуть то, что было до
-    // истории, дальше только мешало бы: откатывать теперь есть куда и без
+    // замены, дальше только мешало бы: откатывать теперь есть куда и без
     // него (Cancel), а строка внизу относилась бы к позапрошлому состоянию.
-    setReplacedText(null)
+    setReplaced(null)
     runAiAction(system, user)
       .then((result) => {
         setApplyState((prev) => receiveResult(prev, id, result))
@@ -323,14 +357,14 @@ export function MainWindow() {
     setActionError(null)
     // Строка с Undo — только если было что терять. Замена пустого редактора
     // ничего не стоила, и сообщать об этом не о чем.
-    setReplacedText(previous.trim() ? previous : null)
+    setReplaced(previous.trim() ? { text: previous, message: HISTORY_NOTICE } : null)
   }
 
   const onUndoReplace = () => {
-    if (replacedText === null) return
+    if (replaced === null) return
     const view = viewRef.current
-    if (view) resetEditorContent(view, replacedText)
-    setReplacedText(null)
+    if (view) resetEditorContent(view, replaced.text)
+    setReplaced(null)
   }
 
   // Возврат на уровень выше — одна функция на оба входа: полосу ← над сеткой
@@ -739,12 +773,12 @@ export function MainWindow() {
             возврата, а не под сеткой: она про ТЕКСТ, который лежит выше, и
             читается по дороге от него к действиям. Оформлена нейтрально, а не
             как ошибка (.mw-error) — ничего не сломалось, это уведомление. */}
-        {replacedText !== null && (
+        {replaced !== null && (
           <div className="mw-notice">
-            <span>Loaded from history. The text that was here has been replaced.</span>
+            <span>{replaced.message}</span>
             <div className="mw-error-actions">
               <button onClick={onUndoReplace}>Undo</button>
-              <button onClick={() => setReplacedText(null)}>Dismiss</button>
+              <button onClick={() => setReplaced(null)}>Dismiss</button>
             </div>
           </div>
         )}
