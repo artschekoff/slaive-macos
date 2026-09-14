@@ -30,6 +30,7 @@
  *  нельзя — ShortcutCapture трактует Escape как отмену записи комбинации. */
 export const SHORTCUT_FIELDS = [
   { key: 'hotkey', label: 'Record hotkey' },
+  { key: 'captureHotkey', label: 'Capture selection' },
   { key: 'pasteShortcut', label: 'Paste (panel)' },
   { key: 'copyShortcut', label: 'Copy (panel)' },
   { key: 'followShortcut', label: 'Follow (panel)' },

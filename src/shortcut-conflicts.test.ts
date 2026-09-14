@@ -21,6 +21,7 @@ import { DEFAULT_ACCEPT_SHORTCUT, DEFAULT_ACTION_SHORTCUTS } from './action-shor
 // и там же сторожатся своим тестом default_shortcuts_do_not_collide).
 const settings = {
   hotkey: 'Super+KeyT',
+  captureHotkey: 'Ctrl+Super+Space',
   pasteShortcut: DEFAULT_PASTE_SHORTCUT,
   copyShortcut: DEFAULT_COPY_SHORTCUT,
   followShortcut: DEFAULT_FOLLOW_SHORTCUT,
@@ -95,6 +96,15 @@ test('Accept на Shift+Cmd+Enter не конфликтует с Paste на Cmd+
 test('каждое хранимое поле с комбинацией перечислено в SHORTCUT_FIELDS', () => {
   const listed = SHORTCUT_FIELDS.map((f) => f.key).sort()
   assert.deepEqual(listed, Object.keys(settings).sort())
+})
+
+test('хоткей захвата участвует в проверке конфликтов', () => {
+  // Он глобальный, как и хоткей записи: столкновение с чем угодно другим
+  // означает, что одна из двух команд молча перестанет срабатывать.
+  assert.equal(
+    findShortcutConflict(settings.captureHotkey, 'hotkey', settings),
+    'Capture selection'
+  )
 })
 
 test('сообщение называет и комбинацию, и занявшее её поле', () => {

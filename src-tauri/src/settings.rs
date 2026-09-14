@@ -63,6 +63,11 @@ impl Default for AiSettings {
 pub struct Settings {
     /// Строка хоткея в формате Tauri, например "Ctrl+Space".
     pub hotkey: String,
+    /// Глобальный хоткей захвата выделенного текста. Как и `hotkey`,
+    /// регистрируется системно, поэтому перехватывает комбинацию во всех
+    /// приложениях сразу.
+    #[serde(default = "default_capture_hotkey")]
+    pub capture_hotkey: String,
     /// Абсолютный путь к файлу модели ggml-*.bin.
     pub model_path: Option<PathBuf>,
     /// "auto" | "ru" | "en"
@@ -215,6 +220,10 @@ pub struct Settings {
 /// поле пусто (см. `translate_languages`). Дублируется на фронтенде
 /// (DEFAULT_TRANSLATE_LANGUAGES в src/action-tree.ts) ровно как остальные
 /// дефолты: там это заглушка до первого ответа get_settings.
+fn default_capture_hotkey() -> String {
+    "Ctrl+Super+Space".to_string()
+}
+
 pub const DEFAULT_TRANSLATE_LANGUAGES: &str = "English, Spanish, Russian";
 
 pub const DEFAULT_DICTIONARY: &str = "commit\n\
@@ -296,6 +305,7 @@ impl Default for Settings {
             // с «New Tab» в большинстве приложений; предупреждение об этом
             // теперь в подсказке настроек, а не здесь.
             hotkey: "Super+KeyT".to_string(),
+            capture_hotkey: default_capture_hotkey(),
             model_path: None,
             language: "auto".to_string(),
             vad_model_path: None,
@@ -624,6 +634,7 @@ mod tests {
         );
         let s = Settings {
             hotkey: "Alt+Space".into(),
+            capture_hotkey: "Ctrl+Super+Space".into(),
             model_path: Some(std::path::PathBuf::from("/tmp/ggml-small.bin")),
             language: "ru".into(),
             vad_model_path: Some(std::path::PathBuf::from("/tmp/ggml-silero-v5.1.2.bin")),
@@ -919,5 +930,26 @@ mod tests {
             loaded.ai.providers.get("openrouter").unwrap().model,
             "openai/gpt-4o-mini"
         );
+    }
+
+    #[test]
+    fn capture_hotkey_defaults_to_ctrl_cmd_space() {
+        let s = Settings::default();
+        assert_eq!(s.capture_hotkey, "Ctrl+Super+Space");
+    }
+
+    #[test]
+    fn missing_capture_hotkey_falls_back_to_default() {
+        // Файл настроек от прежней версии не содержит этого поля вовсе —
+        // оно обязано взять значение по умолчанию, а не уронить чтение.
+        let dir = tmp();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"hotkey":"Alt+Space","language":"ru"}"#,
+        )
+        .unwrap();
+        let s = load(&dir);
+        assert_eq!(s.capture_hotkey, "Ctrl+Super+Space");
+        assert_eq!(s.hotkey, "Alt+Space");
     }
 }

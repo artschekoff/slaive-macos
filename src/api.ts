@@ -3,6 +3,8 @@ import type { AiSettings } from './ai.ts'
 
 export type Settings = {
   hotkey: string
+  /** Глобальный хоткей захвата выделенного текста из чужого приложения. */
+  captureHotkey: string
   modelPath: string | null
   language: 'auto' | 'ru' | 'en'
   /** Optional VAD model path. `null` means VAD is off — transcription still works. */
