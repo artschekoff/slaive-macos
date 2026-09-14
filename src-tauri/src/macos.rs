@@ -136,9 +136,8 @@ pub fn send_copy() -> anyhow::Result<()> {
 #[allow(dead_code)]
 pub fn pasteboard_change_count() -> i64 {
     use objc2_app_kit::NSPasteboard;
-    // Safety: NSPasteboard::generalPasteboard возвращает синглтон, живущий
-    // столько же, сколько процесс; changeCount у него — обычное чтение
-    // счётчика без побочных эффектов.
+    // generalPasteboard() возвращает синглтон, живущий столько же, сколько
+    // процесс; changeCount() — обычное чтение счётчика без побочных эффектов.
     NSPasteboard::generalPasteboard().changeCount() as i64
 }
 
