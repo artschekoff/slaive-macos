@@ -1731,3 +1731,30 @@ button.primary {
   pointer-events: none;
   user-select: none;
 }
+
+/* Кнопка настроек — та же геометрия и материал, что у .overlay-close, но
+   левее на свою ширину плюс зазор. Отдельное правило, а не общий класс:
+   различаются только координата и символ, и общий класс на две кнопки
+   потребовал бы модификатора, что длиннее самого правила. */
+.overlay .overlay-settings {
+  position: absolute;
+  top: 8px;
+  right: 34px;
+  width: 20px;
+  height: 20px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  line-height: 1;
+  color: #8e8e93;
+  background: rgba(255, 255, 255, 0.06);
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+.overlay .overlay-settings:hover {
+  color: #f2f2f7;
+  background: rgba(255, 255, 255, 0.12);
+}

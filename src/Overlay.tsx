@@ -13,6 +13,7 @@ import {
   getSettings,
   hideOverlay,
   openPrivacyPane,
+  openSettingsWindow,
   pasteText,
   setOverlayHasText,
   startRecording,
@@ -998,6 +999,18 @@ export function Overlay() {
           Escape по-прежнему закрывает панель тем же путём (см. глобальный
           обработчик клавиш ниже) — эта кнопка лишь даёт кликабельную
           альтернативу, поведение не дублирует и не переопределяет. */}
+      {/* Настройки рядом с закрытием: обе кнопки управляют окном, а не
+          текстом, поэтому живут в одном углу и вне сетки действий — по той
+          же причине, по которой оттуда в своё время уехали Play и Close. */}
+      <button
+        type="button"
+        className="overlay-settings"
+        onClick={() => openSettingsWindow()}
+        aria-label="Settings"
+        title="Settings"
+      >
+        ⚙
+      </button>
       <button
         type="button"
         className="overlay-close"
