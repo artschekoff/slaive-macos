@@ -2,6 +2,7 @@
 
 mod ai;
 mod audio;
+mod capture;
 mod commands;
 mod history;
 mod macos;
