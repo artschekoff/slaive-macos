@@ -1,4 +1,5 @@
 use crate::audio::Recorder;
+use crate::capture::ClipboardGate;
 use crate::settings::Settings;
 use crate::whisper::Transcriber;
 use std::sync::atomic::AtomicBool;
@@ -10,6 +11,11 @@ pub struct AppState {
     /// PID приложения, которое было активным в момент нажатия хоткея.
     /// Используется при вставке текста, чтобы вернуть фокус в исходное окно.
     pub prev_app_pid: Mutex<Option<i32>>,
+    /// Единственный вход к общему буферу обмена. Держат его на всё время
+    /// своей последовательности захват выделения и вставка текста — обе
+    /// пишут в буфер чужое содержимое и обе обязаны видеть его нетронутым
+    /// (см. `capture::ClipboardGate`).
+    pub clipboard: ClipboardGate,
     /// Активная запись с микрофона, если она сейчас идёт.
     pub recorder: Mutex<Option<Recorder>>,
     /// Загруженная модель whisper, если она уже загружена.
@@ -65,6 +71,7 @@ impl AppState {
         Self {
             settings: Mutex::new(settings),
             prev_app_pid: Mutex::new(None),
+            clipboard: ClipboardGate::default(),
             recorder: Mutex::new(None),
             transcriber: Mutex::new(None),
             current_hotkey: Mutex::new(None),

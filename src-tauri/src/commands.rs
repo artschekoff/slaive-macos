@@ -32,6 +32,11 @@ const LEVEL_EMIT_INTERVAL: Duration = Duration::from_millis(50);
 const ACCESSIBILITY_PERMISSION_MESSAGE: &str = "Slaive needs Accessibility permission to send keystrokes to other apps. \
      Go to System Settings → Privacy & Security → Accessibility and turn \
      Slaive on.";
+/// Тот же отказ, но своими словами: захват не «шлёт нажатия другим
+/// приложениям» в глазах пользователя, он копирует выделенный текст.
+/// Раздел системных настроек при этом один и тот же.
+const CAPTURE_ACCESSIBILITY_MESSAGE: &str = "Slaive needs Accessibility permission to copy the selected text. \
+     Open System Settings → Privacy & Security → Accessibility and enable Slaive.";
 const AUTOMATION_PERMISSION_MESSAGE: &str = "Slaive needs permission to control System Events to bring back the app \
      you were using. Go to System Settings → Privacy & Security → Automation \
      → Slaive → System Events and turn it on.";
@@ -1405,29 +1410,95 @@ impl CaptureOps for RealCaptureOps<'_> {
     }
 }
 
+/// Какой PID запомнить как цель вставки ПОСЛЕ попытки захвата.
+///
+/// Два правила, и оба видны здесь целиком, а не разбросаны по телу команды.
+///
+/// Первое: неудачная попытка цель не трогает. Захват читает `frontmost_pid()`
+/// первым делом — иначе главное окно успеет забрать фокус, — но нажатие без
+/// выделения, отказ буфера обмена или отказ в праве ничем не отличаются для
+/// пользователя от «ничего не произошло». Надиктовать в одном приложении,
+/// перейти в другое, нажать там хоткей впустую — и Paste, отправляющий
+/// расшифровку из первого приложения во второе, ровно тот случай, который
+/// `captured` и закрывает.
+///
+/// Второе: даже при удаче целью не может стать сам Slaive — это тот же
+/// инвариант, что у записи, и считает его та же `next_source_pid`. Захват —
+/// единственный путь к главному окну, который её когда-то обходил.
+fn capture_source_pid(
+    current: Option<i32>,
+    frontmost: Option<i32>,
+    own_pid: i32,
+    captured: bool,
+) -> Option<i32> {
+    if !captured {
+        return current;
+    }
+    next_source_pid(current, frontmost, own_pid)
+}
+
+/// Почему захват не состоялся. Отказ в праве — единственная ошибка, из
+/// которой пользователь может выйти сам, поэтому он едет отдельной веткой:
+/// показывать его надо тем же событием с кнопкой «Open System Settings»,
+/// что и во всех остальных местах приложения (см. `emit_accessibility_error`).
+enum CaptureFailure {
+    NeedsAccessibility,
+    Failed(String),
+}
+
+impl CaptureFailure {
+    fn message(&self) -> String {
+        match self {
+            Self::NeedsAccessibility => CAPTURE_ACCESSIBILITY_MESSAGE.to_string(),
+            Self::Failed(message) => message.clone(),
+        }
+    }
+}
+
 /// Захватывает выделенный текст из активного приложения и открывает его в
 /// главном окне — тем же путём, которым туда попадает надиктованное по кнопке
 /// Follow.
 #[tauri::command]
 pub fn capture_selection(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    try_capture_selection(&app, &state).map_err(|e| e.message())
+}
+
+/// Сам захват. Отдельно от команды ради типизированного отказа: граница
+/// команд обязана отдавать `Result<T, String>`, а обработчику хоткея нужно
+/// различать отказ в праве и всё остальное.
+fn try_capture_selection(app: &AppHandle, state: &AppState) -> Result<(), CaptureFailure> {
+    // Буфер обмена занимаем на всю последовательность — до возврата прежнего
+    // содержимого. Второе нажатие хоткея и вставка, попав внутрь этого окна,
+    // прочитали бы как «буфер пользователя» чужое выделение (см.
+    // `capture::ClipboardGate`). Отбрасываем, а не ждём: пока подошла бы
+    // очередь, и выделение, и фокус уже другие.
+    let Some(_hold) = state.clipboard.try_hold() else {
+        return Err(CaptureFailure::Failed(
+            "Slaive is still working with the clipboard. Try again in a moment.".to_string(),
+        ));
+    };
+
     // Право проверяется ДО попытки: CGEventPost при отказе молчит, и без
     // проверки пользователь увидел бы «ничего не выделено» вместо «нет прав».
     if !macos::has_accessibility_permission() {
-        return Err(
-            "Slaive needs Accessibility permission to copy the selected text. \
-             Open System Settings → Privacy & Security → Accessibility and enable Slaive."
-                .to_string(),
-        );
+        return Err(CaptureFailure::NeedsAccessibility);
     }
 
-    // PID запоминаем ДО того, как главное окно заберёт фокус: иначе целью
-    // вставки станет сам Slaive. Ровно эта ошибка уже случалась с Follow.
-    if let Some(pid) = macos::frontmost_pid() {
-        *state.prev_app_pid.lock().unwrap() = Some(pid);
+    // frontmost_pid() спрашиваем ПЕРВЫМ — позже впереди окажется главное окно
+    // самого Slaive. А запоминаем ответ только после попытки и только по её
+    // итогу: вся логика в `capture_source_pid`.
+    let frontmost = macos::frontmost_pid();
+    let own_pid = std::process::id() as i32;
+
+    let ops = RealCaptureOps { app };
+    let outcome = capture::capture_selection(&ops);
+
+    {
+        let mut slot = state.prev_app_pid.lock().unwrap();
+        *slot = capture_source_pid(*slot, frontmost, own_pid, outcome.is_ok());
     }
 
-    let ops = RealCaptureOps { app: &app };
-    let outcome = capture::capture_selection(&ops).map_err(|e| e.to_string())?;
+    let outcome = outcome.map_err(|e| CaptureFailure::Failed(e.to_string()))?;
 
     // Содержимое не логируем — это текст пользователя. Длина безопасна.
     eprintln!(
@@ -1436,7 +1507,7 @@ pub fn capture_selection(app: AppHandle, state: State<'_, AppState>) -> Result<(
         outcome.restored_clipboard
     );
 
-    follow_to_main_window(app, outcome.text)
+    follow_to_main_window(app.clone(), outcome.text).map_err(CaptureFailure::Failed)
 }
 
 /// Регистрирует глобальный хоткей захвата. Отдельно от `register_hotkey`:
@@ -1460,11 +1531,6 @@ pub fn register_capture_hotkey(app: &AppHandle, hotkey: &str) -> anyhow::Result<
         return Ok(());
     }
 
-    let state = app.state::<AppState>();
-    if let Some(old) = state.current_capture_hotkey.lock().unwrap().take() {
-        let _ = gs.unregister(old);
-    }
-
     let handle = app.clone();
     gs.on_shortcut(shortcut, move |_app, _shortcut, event| {
             // Только на нажатие: иначе команда выполнится дважды за одно
@@ -1477,14 +1543,43 @@ pub fn register_capture_hotkey(app: &AppHandle, hotkey: &str) -> anyhow::Result<
             // на полусекундном опросе буфера обмена.
             std::thread::spawn(move || {
                 let state = app.state::<AppState>();
-                if let Err(e) = capture_selection(app.clone(), state) {
-                    let _ = app.emit_to("overlay", "capture:error", e.clone());
-                    eprintln!("захват не удался: {e}");
+                let Err(failure) = try_capture_selection(&app, &state) else {
+                    return;
+                };
+                // Панель показывает Rust, как и во всех остальных путях с
+                // ошибкой (ср. `paste_text`): захват мог не открывать её
+                // вовсе. Фокус при этом НЕ забираем — он обязан остаться у
+                // приложения, из которого выделяли текст (см. `show_overlay`).
+                show_overlay(&app);
+                match &failure {
+                    // Отказ в праве — с кнопкой «Open System Settings»:
+                    // единственная ошибка, из которой пользователь может
+                    // выйти сам, и единственная, где текст велит идти в
+                    // настройки. Тот же путь, что у записи и вставки.
+                    CaptureFailure::NeedsAccessibility => emit_accessibility_error(
+                        &app,
+                        CAPTURE_ACCESSIBILITY_MESSAGE,
+                        macos::PrivacyPane::Accessibility,
+                    ),
+                    CaptureFailure::Failed(message) => {
+                        let _ = app.emit_to("overlay", "capture:error", message.clone());
+                    }
                 }
+                eprintln!("захват не удался: {}", failure.message());
             });
         })?;
 
-    *state.current_capture_hotkey.lock().unwrap() = Some(shortcut);
+    // Порядок как в try_register_hotkey: старую комбинацию снимаем только
+    // после того, как ОС подтвердила новую. Иначе комбинация, занятая другим
+    // приложением, оставила бы пользователя вообще без хоткея захвата — при
+    // том что сохранение настроек ему же и не удалось.
+    let state = app.state::<AppState>();
+    let mut current = state.current_capture_hotkey.lock().unwrap();
+    if let Some(old) = current.take() {
+        let _ = gs.unregister(old);
+    }
+    *current = Some(shortcut);
+
     Ok(())
 }
 
@@ -1495,6 +1590,17 @@ pub fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn paste_text(app: AppHandle, text: String) -> Result<(), String> {
+    // Тот же вход к буферу обмена, что и у захвата, и по той же причине:
+    // вставка кладёт в буфер свой текст, а идущий захват как раз опрашивает
+    // счётчик изменений. Столкнувшись, они ломают друг друга насквозь —
+    // захват примет вставляемую расшифровку за выделение пользователя, а
+    // потом затрёт её тем, что лежало в буфере до него, и Cmd+V отправит в
+    // приложение не то. Держим до самого нажатия, а не только на время
+    // записи в буфер: до Cmd+V содержимое должно оставаться нашим.
+    let Some(hold) = app.state::<AppState>().clipboard.try_hold() else {
+        return Err("Slaive is still working with the clipboard. Try again in a moment.".to_string());
+    };
+
     app.clipboard()
         .write_text(text)
         .map_err(|e| e.to_string())?;
@@ -1514,6 +1620,9 @@ pub fn paste_text(app: AppHandle, text: String) -> Result<(), String> {
 
     // osascript блокирует поток на ~100 мс — уводим в фон, чтобы UI не подвисал.
     std::thread::spawn(move || {
+        // Занятость буфера переезжает сюда и снимается уничтожением этого
+        // значения — то есть на выходе из потока, по любой ветке.
+        let _hold = hold;
         // Спрашиваем систему напрямую ДО фокус-ресторейшна и паузы: разбор
         // текста ошибки уже один раз подвёл (см. `permission_pane`), а без
         // права всё равно ничего не выйдет — незачем тратить фиксированную
@@ -1947,15 +2056,39 @@ mod tests {
         assert_eq!(next_source_pid(Some(42), None, 777), None);
     }
 
-    /// Адаптер обязан отдавать примитивы, а не свою логику: весь порядок
-    /// действий живёт в capture.rs и проверяется там на подставных данных.
-    /// Здесь проверяем лишь то, что чтение счётчика ходит в настоящий буфер
-    /// обмена и возвращает то же, что macos::pasteboard_change_count.
+    /// Нажатие хоткея захвата впустую не должно переназначать цель вставки.
+    /// Сценарий: надиктовали в VS Code, перешли в Chrome, нажали хоткей
+    /// ничего не выделив. Захват не удался — значит и вставлять по-прежнему
+    /// некуда, кроме VS Code, откуда пришёл текст в панели.
     #[test]
-    fn capture_ops_reads_the_real_change_count() {
-        let a = crate::macos::pasteboard_change_count();
-        let b = crate::macos::pasteboard_change_count();
-        assert_eq!(a, b);
+    fn a_failed_capture_leaves_the_paste_target_alone() {
+        const VS_CODE: i32 = 42;
+        const CHROME: i32 = 99;
+        const OWN: i32 = 777;
+        assert_eq!(
+            capture_source_pid(Some(VS_CODE), Some(CHROME), OWN, false),
+            Some(VS_CODE)
+        );
+        // И цель на пустом месте не появляется тоже.
+        assert_eq!(capture_source_pid(None, Some(CHROME), OWN, false), None);
+    }
+
+    /// Удавшийся захват из чужого приложения — единственный случай, когда
+    /// цель меняется: текст пришёл оттуда, туда же его и вставлять.
+    #[test]
+    fn a_successful_capture_moves_the_paste_target() {
+        assert_eq!(capture_source_pid(Some(42), Some(99), 777, true), Some(99));
+    }
+
+    /// Захват — единственный путь к главному окну, который когда-то обходил
+    /// `next_source_pid`. После любого захвата активное приложение — сам
+    /// Slaive, и повторное нажатие хоткея в нём не должно делать целью
+    /// вставки собственное окно: Cmd+V ушёл бы в него, и текст исчез бы.
+    #[test]
+    fn a_capture_never_makes_slaive_the_paste_target() {
+        const OWN: i32 = 777;
+        assert_eq!(capture_source_pid(Some(42), Some(OWN), OWN, true), Some(42));
+        assert_eq!(capture_source_pid(None, Some(OWN), OWN, true), None);
     }
 
     #[test]
