@@ -66,6 +66,15 @@ const ACTION_MODIFIER_ERROR =
   'An action shortcut needs at least one modifier — a bare key would be swallowed by the Vim ' +
   'editor in the text field. Cmd combinations are the safest.'
 
+// У Follow причина требовать модификатор своя, и она не та же, что у действий
+// главного окна: там голая клавиша досталась бы редактору, а здесь наоборот —
+// панель ловит Follow на фазе перехвата и гасит событие, поэтому голая клавиша
+// была бы У РЕДАКТОРА ОТОБРАНА. Текст ошибки обязан называть настоящую
+// причину, иначе он врёт (тот же довод, что у modifierError в ShortcutCapture).
+const FOLLOW_MODIFIER_ERROR =
+  'Follow needs at least one modifier. The panel catches this combination before the text field ' +
+  'does, so a bare key would stop reaching the editor at all.'
+
 export function Settings() {
   const [s, setS] = useState<S | null>(null)
   const [saved, setSaved] = useState(false)
@@ -673,6 +682,24 @@ export function Settings() {
         hotkey above.
       </p>
 
+      <label>
+        Follow shortcut
+        <ShortcutCapture
+          value={s.followShortcut}
+          onChange={(accel) => patch({ followShortcut: accel })}
+          requireModifier
+          modifierError={FOLLOW_MODIFIER_ERROR}
+          validate={conflictCheck('followShortcut')}
+        />
+      </label>
+      <p className="hint">
+        Hands the recognized text to the main window, where the AI actions live. Unlike Paste and
+        Copy this one needs a modifier: the panel catches it before the text field does, so a bare
+        key would stop reaching the editor at all. The default <code>Ctrl + F</code> takes{' '}
+        <code>Ctrl + F</code> away from Vim's page-forward in that field — there is nothing to page
+        through in a dictated phrase.
+      </p>
+
       <h2>Main window actions</h2>
       <p className="hint">
         Each action in the main window's menu has a shortcut, shown on its button. Like Paste and
@@ -701,6 +728,33 @@ export function Settings() {
         Sends the text in the main window back to the app you dictated from — the same place the
         panel's Paste sends it. It has its own combination because the panel's default is a bare{' '}
         <code>Enter</code>, and in the main window Enter belongs to the editor.
+      </p>
+
+      {/* Accept — своя строка по той же причине, что и Paste выше: это шаг
+          цикла применения, а не пункт дерева действий (ActionShortcutKey). */}
+      <label>
+        Accept
+        <ShortcutCapture
+          value={s.acceptShortcut}
+          onChange={(accel) => patch({ acceptShortcut: accel })}
+          requireModifier
+          modifierError={ACTION_MODIFIER_ERROR}
+          validate={conflictCheck('acceptShortcut')}
+        />
+      </label>
+      <p className="hint">
+        Makes the model's proposal the text for good. The default{' '}
+        <code>Shift + Cmd + Enter</code> is one notch stiffer than Paste's <code>Cmd + Enter</code>{' '}
+        on purpose: accepting replaces what you had, and the text that was there is then only
+        reachable through the editor's Undo.
+      </p>
+      <p className="hint">
+        Going back a menu level and cancelling a proposal are both <code>Esc</code>, and that one
+        can't be reassigned — it is the key every app uses for "get me out of here", and the main
+        window also needs it literally for leaving Vim's insert mode and for closing the
+        permission notice. Which of the two you get is written on screen: the <code>⎋</code> badge
+        sits on <code>← Back</code> while the menu is live, and moves to <code>Cancel</code> while
+        a request is running or a proposal is waiting for you.
       </p>
 
       {ACTION_SHORTCUT_ROWS.map(({ key, label }) => (

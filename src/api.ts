@@ -14,6 +14,12 @@ export type Settings = {
   /** Window-level shortcut that copies the transcript to the clipboard.
    *  Same scoping as pasteShortcut. Default "Super+KeyC" (Cmd+C). */
   copyShortcut: string
+  /** Window-level shortcut that hands the transcript to the main window
+   *  (the panel's Follow button). Same scoping as pasteShortcut, but a
+   *  modifier is required: the panel catches it on the capture phase and stops
+   *  it there, so a bare key would be taken away from the Vim editor.
+   *  Default "Ctrl+KeyF" (Ctrl+F) — Cmd+F is already Fix in the main window. */
+  followShortcut: string
   /** Window-level shortcuts for the main window's action menu (see
    *  action-shortcuts.ts). Same scoping as pasteShortcut/copyShortcut: they
    *  only fire while the main window is focused, never system-wide. */
@@ -28,6 +34,13 @@ export type Settings = {
    *  window has no such action, so a bare Enter there would mean what it means
    *  in any editor — a new line. Default "Super+Enter" (Cmd+Return). */
   mainPasteShortcut: string
+  /** Window-level shortcut for Accept — the step that makes the model's
+   *  proposal the text for good. Deliberately stiffer than Paste: accepting
+   *  replaces what the user had, and the previous text is then only reachable
+   *  through the editor's Undo. Default "Shift+Super+Enter" (Shift+Cmd+Return).
+   *  Its counterpart Cancel is Escape and is not stored — see ESCAPE_SHORTCUT
+   *  in action-shortcuts.ts. */
+  acceptShortcut: string
   /** AI provider settings — model + base URL per provider. Keys live in the
    *  Keychain, never here (see `aiKeySet` below and `set_ai_key`). */
   ai: AiSettings

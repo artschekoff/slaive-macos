@@ -15,12 +15,14 @@ export type SettingKey =
   | 'hotkey'
   | 'pasteShortcut'
   | 'copyShortcut'
+  | 'followShortcut'
   | 'translateShortcut'
   | 'askAiShortcut'
   | 'fixShortcut'
   | 'shortenShortcut'
   | 'summarizeShortcut'
   | 'mainPasteShortcut'
+  | 'acceptShortcut'
   | 'ai'
   | 'translateLanguages'
   | 'windowOpacity'
@@ -100,12 +102,14 @@ export const SECTIONS: readonly Section[] = [
       'hotkey',
       'pasteShortcut',
       'copyShortcut',
+      'followShortcut',
       'translateShortcut',
       'askAiShortcut',
       'fixShortcut',
       'shortenShortcut',
       'summarizeShortcut',
       'mainPasteShortcut',
+      'acceptShortcut',
     ],
   },
   {

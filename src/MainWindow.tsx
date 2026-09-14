@@ -39,7 +39,9 @@ import {
 } from './api'
 import { HistoryView } from './HistoryView'
 import {
+  DEFAULT_ACCEPT_SHORTCUT,
   DEFAULT_ACTION_SHORTCUTS,
+  ESCAPE_SHORTCUT,
   nodeForKey,
   shortcutFor,
   type ActionShortcuts,
@@ -137,6 +139,9 @@ export function MainWindow() {
   // не действие меню и в дереве его нет. Грузится и обновляется тем же
   // эффектом — источник настроек один.
   const [mainPasteShortcut, setMainPasteShortcut] = useState(DEFAULT_MAIN_PASTE_SHORTCUT)
+  // Accept — по той же причине отдельным состоянием, что и Paste выше: это не
+  // узел дерева действий, а шаг цикла применения (см. apply-state.ts).
+  const [acceptShortcut, setAcceptShortcut] = useState(DEFAULT_ACCEPT_SHORTCUT)
   useEffect(() => {
     const take = (s: Settings): ActionShortcuts => ({
       translateShortcut: s.translateShortcut,
@@ -148,6 +153,7 @@ export function MainWindow() {
     const apply = (s: Settings) => {
       setActionShortcuts(take(s))
       setMainPasteShortcut(s.mainPasteShortcut)
+      setAcceptShortcut(s.acceptShortcut)
       // Строка, а не разобранный список: разбор и запасной дефолт живут в
       // одном месте (buildActionTree), а сравнение "поменялось ли" здесь
       // сводится к сравнению строк — новый массив узлов появляется только
@@ -461,10 +467,31 @@ export function MainWindow() {
           setShowHistory(false)
           return
         }
+        // Цикл применения открыт — Escape это Cancel, а не Back. Так и
+        // только так: человек, который смотрит на предложение модели, нажмёт
+        // именно эту клавишу, потому что она везде означает «выйти отсюда», а
+        // единственный выход отсюда и есть Cancel. Уровнем выше в этот момент
+        // всё равно не уйти — полоса ← выключена (см. JSX), — так что Escape
+        // не отбирается у Back, а достаётся ему обратно, как только цикл
+        // закрыт.
+        //
+        // Отличить одно состояние от другого можно глазами, а не памятью:
+        // бейдж ⎋ рисуется ровно на той кнопке, которая сейчас его получит, —
+        // на ← Back, пока меню живое, и на Cancel, пока идёт (или ждёт
+        // решения) запрос. Двух включённых ⎋ на экране не бывает: бейдж на
+        // ← Back показывается только в фазе idle.
+        //
+        // Из pending тоже Cancel, а не «ничего»: запрос в полёте рвётся тем
+        // же путём, что и по кнопке (см. onCancel).
+        if (applyState.phase === 'pending' || applyState.phase === 'proposed') {
+          e.preventDefault()
+          onCancel()
+          return
+        }
         // Возврат на уровень выше — то же, что делает полоса ← над сеткой.
         // В корне не делаем ничего: закрывать окно по Escape никто не просил,
         // а «ничего» здесь честнее, чем придуманное действие.
-        if (applyState.phase === 'idle' && !atRoot) {
+        if (!atRoot) {
           e.preventDefault()
           onBack()
         }
@@ -474,6 +501,17 @@ export function MainWindow() {
       // Пока открыт слой права, окно ничего больше не слушает: у слоя ровно
       // два выхода — Open Settings и Close.
       if (showAccessModal) return
+
+      // Accept — единственное, что срабатывает в фазе proposed, и только в
+      // ней: вне цикла применения принимать нечего, а в pending предложения
+      // ещё нет. Проверка стоит ДО общего guard'а «фаза не idle — выходим»
+      // ниже именно поэтому.
+      if (matchesShortcut(e, acceptShortcut)) {
+        if (applyState.phase !== 'proposed') return
+        e.preventDefault()
+        onAccept()
+        return
+      }
 
       if (matchesShortcut(e, mainPasteShortcut)) {
         if (!canPaste) return
@@ -721,9 +759,20 @@ export function MainWindow() {
             Выключается там же, где выключается возврат (идёт запрос к ИИ):
             уходить с панели Accept/Cancel некуда — ни вбок, ни в историю. */}
         <div className="mw-trail">
+          {/* Бейдж ⎋ на возврате. Escape умел это и раньше, но нигде не был
+              написан — «работает, но никто не знает» ничем не лучше, чем «не
+              работает». Рисуется тем же formatShortcutBadge из той же записи
+              акселератора, что и остальные бейджи (ESCAPE_SHORTCUT), а не
+              зашитым символом.
+
+              В сетке уровня бейдж на возврате НЕ показывается, когда кнопка
+              выключена (идёт запрос к ИИ): в этот момент Escape принадлежит
+              Cancel, и обещать его здесь было бы ложью. Ровно этим человек и
+              отличает два состояния Escape — по тому, у какой кнопки сейчас
+              стоит ⎋. */}
           {showHistory ? (
             <button type="button" className="mw-back" onClick={() => setShowHistory(false)}>
-              ← Actions
+              ← Actions <span className="shortcut-badge">{formatShortcutBadge(ESCAPE_SHORTCUT)}</span>
             </button>
           ) : (
             !atRoot && (
@@ -734,6 +783,9 @@ export function MainWindow() {
                 onClick={onBack}
               >
                 ← {currentLevelLabel(menuState) ?? 'Back'}
+                {applyState.phase === 'idle' && (
+                  <span className="shortcut-badge">{formatShortcutBadge(ESCAPE_SHORTCUT)}</span>
+                )}
               </button>
             )
           )}
@@ -779,19 +831,32 @@ export function MainWindow() {
             <div key="pending" className="mw-panel mw-apply-panel">
               <span className="mw-spinner" aria-hidden="true" />
               <span className="mw-pending-label">Working…</span>
+              {/* Cancel в pending рвёт запрос — и делает это по Escape тоже
+                  (см. обработчик клавиш выше), поэтому бейдж здесь такой же,
+                  как у proposed ниже: одна клавиша, одно обещание. */}
               <div className="action-grid action-grid-1">
-                <button onClick={onCancel}>Cancel</button>
+                <button onClick={onCancel}>
+                  Cancel <span className="shortcut-badge">{formatShortcutBadge(ESCAPE_SHORTCUT)}</span>
+                </button>
               </div>
             </div>
           )}
 
           {applyState.phase === 'proposed' && (
             <div key="proposed" className="mw-panel mw-apply-panel">
+              {/* Два выхода из цикла и две подписанные клавиши. У Accept она
+                  намеренно тугая (⇧⌘⏎, настройка acceptShortcut): принятие
+                  затирает текст пользователя предложением модели, и вернуть
+                  прежний можно только через Undo редактора. У Cancel — ⎋,
+                  привычное «выйти отсюда»; пока эта панель на экране, Escape
+                  принадлежит ей, а не возврату по меню. */}
               <div className="action-grid action-grid-2">
                 <button className="primary" onClick={onAccept}>
-                  Accept
+                  Accept <span className="shortcut-badge">{formatShortcutBadge(acceptShortcut)}</span>
                 </button>
-                <button onClick={onCancel}>Cancel</button>
+                <button onClick={onCancel}>
+                  Cancel <span className="shortcut-badge">{formatShortcutBadge(ESCAPE_SHORTCUT)}</span>
+                </button>
               </div>
             </div>
           )}

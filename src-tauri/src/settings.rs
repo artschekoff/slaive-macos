@@ -80,6 +80,13 @@ pub struct Settings {
     /// Хоткей копирования текста в панели — та же оговорка, что у
     /// `paste_shortcut`: окно-локальный, не глобальный.
     pub copy_shortcut: String,
+    /// Хоткей кнопки Follow в панели — «передать текст в главное окно».
+    /// Та же оговорка, что у `paste_shortcut`/`copy_shortcut`: окно-локальный.
+    /// В отличие от них требует модификатора (см. Settings.tsx): панель
+    /// ловит его на ФАЗЕ ПЕРЕХВАТА и гасит распространение, иначе Ctrl+F
+    /// достался бы vim (`<C-f>` — постраничная прокрутка), — а голая клавиша,
+    /// перехваченная так же, отобрала бы у редактора обычный ввод.
+    pub follow_shortcut: String,
     /// Хоткеи действий главного окна (Translate / Ask AI / Fix / Shorten /
     /// Summarize) — та же оговорка, что у `paste_shortcut`/`copy_shortcut`:
     /// окно-локальные, перехватываются обычным keydown внутри окна `main`
@@ -104,6 +111,19 @@ pub struct Settings {
     /// окна своя комбинация, и она с модификатором, как и остальные четыре
     /// его хоткея.
     pub main_paste_shortcut: String,
+    /// Хоткей кнопки Accept главного окна — «предложение ИИ становится
+    /// текстом окончательно». Та же оговорка, что у остальных: окно-локальный.
+    ///
+    /// Отдельная комбинация, а не переиспользование `main_paste_shortcut`,
+    /// хотя в фазе `proposed` Paste и недоступен: Accept ЗАМЕНЯЕТ текст
+    /// пользователя, и прежний достаётся только через Undo редактора. Клавиша,
+    /// которой человек привык отправлять текст, не должна по случайности
+    /// принимать чужую правку — поэтому у Accept свой, намеренно более
+    /// тугой аккорд.
+    ///
+    /// Пары Cancel у него в настройках нет: Cancel — это Escape, и он не
+    /// хранится (см. ESCAPE_SHORTCUT в src/action-shortcuts.ts).
+    pub accept_shortcut: String,
     /// Настройки ИИ-провайдеров — модель и адрес на каждого, БЕЗ ключей
     /// (они в Keychain). См. `AiSettings`.
     pub ai: AiSettings,
@@ -285,6 +305,15 @@ impl Default for Settings {
             paste_shortcut: "Enter".to_string(),
             // Cmd+C — стандартное системное сочетание для копирования.
             copy_shortcut: "Super+KeyC".to_string(),
+            // Ctrl+F — выбор пользователя: F от Follow, а Cmd+F в том же
+            // приложении уже занят Fix (`fix_shortcut` ниже). Комбинации
+            // РАЗНЫЕ строками ("Ctrl+KeyF" против "Super+KeyF"), поэтому
+            // проверка столкновений их не путает, и живут они к тому же в
+            // разных окнах. Ctrl взят осознанно: у vim `<C-f>` — постраничная
+            // прокрутка, но в короткой надиктованной фразе прокручивать
+            // нечего (тот же довод, по которому `<CR>` в normal-режиме
+            // панели переопределён с "j^" на Paste).
+            follow_shortcut: "Ctrl+KeyF".to_string(),
             // Действия главного окна — все с Cmd: поле текста там это
             // CodeMirror с Vim, и голая клавиша (как и Ctrl-комбинация) была
             // бы отобрана у редактирования. В грамматике Vim модификатора
@@ -310,6 +339,14 @@ impl Default for Settings {
             // комбинация не отбирает Enter ни у insert-режима (перенос
             // строки), ни у normal-режима.
             main_paste_shortcut: "Super+Enter".to_string(),
+            // Shift+Cmd+Enter — тот же «подтвердить», что у Paste, но с
+            // добавленным Shift. Два модификатора здесь не педантизм: Accept
+            // затирает текст пользователя предложением модели, и вернуть
+            // прежний можно только через Undo редактора, — а Cmd+Enter (Paste)
+            // человек в этом же окне жмёт привычно и часто. Соседство
+            // помогает помнить (⇧⌘⏎ принять → ⌘⏎ вставить), лишний Shift
+            // мешает попасть случайно.
+            accept_shortcut: "Shift+Super+Enter".to_string(),
             ai: AiSettings::default(),
             translate_languages: DEFAULT_TRANSLATE_LANGUAGES.to_string(),
             // 1.0 — «как было до появления ползунка»: настройка не должна
@@ -482,6 +519,9 @@ mod tests {
         assert_eq!(s.vad_model_path, None);
         assert_eq!(s.paste_shortcut, "Enter");
         assert_eq!(s.copy_shortcut, "Super+KeyC");
+        // Ctrl+F, а не Cmd+F: Cmd+F занят Fix. Строки разные — проверка
+        // столкновений (src/shortcut-conflicts.ts) их не путает.
+        assert_eq!(s.follow_shortcut, "Ctrl+KeyF");
         assert_eq!(s.translate_shortcut, "Super+KeyL");
         assert_eq!(s.ask_ai_shortcut, "Super+KeyK");
         assert_eq!(s.fix_shortcut, "Super+KeyF");
@@ -491,6 +531,9 @@ mod tests {
         // Cmd+Enter, а не голый Enter как у панели: в главном окне Enter
         // принадлежит редактору (см. комментарий у поля).
         assert_eq!(s.main_paste_shortcut, "Super+Enter");
+        // Shift+Cmd+Enter — намеренно туже, чем Paste: Accept затирает текст
+        // пользователя предложением модели.
+        assert_eq!(s.accept_shortcut, "Shift+Super+Enter");
         assert_eq!(s.translate_languages, "English, Spanish, Russian");
         assert_eq!(s.mic_gain, 1.0);
         assert_eq!(s.vad_threshold, 0.5);
@@ -525,6 +568,42 @@ mod tests {
     /// NaN не проходит ни одного сравнения, и `f32::clamp` на нём паникует —
     /// то есть настройки с `NaN` в файле роняли бы приложение на старте,
     /// а не просто выглядели бы странно.
+    /// Дефолтные комбинации не должны совпадать между собой. Ту же проверку
+    /// для комбинаций, которые назначил пользователь, делает фронтенд
+    /// (src/shortcut-conflicts.ts), но ДЕФОЛТЫ рождаются здесь и до той
+    /// проверки не доходят: сломать их правкой `Default` можно молча, а
+    /// наружу это выйдет как «кнопка перестала работать из коробки».
+    ///
+    /// Escape (Back/Cancel в главном окне) в список не входит намеренно: он
+    /// не хранится и назначить его на что-то ещё нельзя — ShortcutCapture
+    /// трактует Escape как отмену записи комбинации, поэтому столкнуться с
+    /// ним структурно нечему.
+    #[test]
+    fn default_shortcuts_do_not_collide() {
+        let s = Settings::default();
+        let all = [
+            ("hotkey", &s.hotkey),
+            ("pasteShortcut", &s.paste_shortcut),
+            ("copyShortcut", &s.copy_shortcut),
+            ("followShortcut", &s.follow_shortcut),
+            ("mainPasteShortcut", &s.main_paste_shortcut),
+            ("acceptShortcut", &s.accept_shortcut),
+            ("translateShortcut", &s.translate_shortcut),
+            ("askAiShortcut", &s.ask_ai_shortcut),
+            ("fixShortcut", &s.fix_shortcut),
+            ("shortenShortcut", &s.shorten_shortcut),
+            ("summarizeShortcut", &s.summarize_shortcut),
+        ];
+        for (i, (name_a, accel_a)) in all.iter().enumerate() {
+            for (name_b, accel_b) in all.iter().skip(i + 1) {
+                assert_ne!(
+                    accel_a, accel_b,
+                    "дефолты {name_a} и {name_b} заняли одну комбинацию {accel_a}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn nan_opacity_falls_back_to_the_default_instead_of_panicking() {
         assert_eq!(clamp_window_opacity(f32::NAN), DEFAULT_WINDOW_OPACITY);
@@ -550,12 +629,14 @@ mod tests {
             vad_model_path: Some(std::path::PathBuf::from("/tmp/ggml-silero-v5.1.2.bin")),
             paste_shortcut: "Shift+Enter".into(),
             copy_shortcut: "Ctrl+Alt+KeyC".into(),
+            follow_shortcut: "Ctrl+Alt+KeyF".into(),
             translate_shortcut: "Ctrl+KeyL".into(),
             ask_ai_shortcut: "Ctrl+KeyK".into(),
             fix_shortcut: "Ctrl+KeyF".into(),
             shorten_shortcut: "Ctrl+KeyS".into(),
             summarize_shortcut: "Ctrl+KeyU".into(),
             main_paste_shortcut: "Ctrl+Enter".into(),
+            accept_shortcut: "Ctrl+Shift+Enter".into(),
             ai: AiSettings {
                 provider: "openai".into(),
                 providers,
@@ -697,6 +778,7 @@ mod tests {
         let s = load(&dir);
         assert_eq!(s.paste_shortcut, "Enter");
         assert_eq!(s.copy_shortcut, "Super+KeyC");
+        assert_eq!(s.follow_shortcut, "Ctrl+KeyF");
     }
 
     /// То же самое для хоткеев действий главного окна: файл, записанный до их
@@ -715,6 +797,7 @@ mod tests {
         assert_eq!(s.fix_shortcut, "Super+KeyF");
         assert_eq!(s.shorten_shortcut, "Super+KeyS");
         assert_eq!(s.summarize_shortcut, "Super+KeyU");
+        assert_eq!(s.accept_shortcut, "Shift+Super+Enter");
         // Соседнее поле читается как раньше.
         assert_eq!(s.paste_shortcut, "Shift+Enter");
     }

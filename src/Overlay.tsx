@@ -22,6 +22,7 @@ import {
 } from './api'
 import {
   DEFAULT_COPY_SHORTCUT,
+  DEFAULT_FOLLOW_SHORTCUT,
   DEFAULT_PASTE_SHORTCUT,
   formatShortcutBadge,
   matchesShortcut,
@@ -248,6 +249,9 @@ export function Overlay() {
   // событию settings:changed, а не только при повторном монтировании.
   const [pasteShortcut, setPasteShortcut] = useState(DEFAULT_PASTE_SHORTCUT)
   const [copyShortcut, setCopyShortcut] = useState(DEFAULT_COPY_SHORTCUT)
+  // Follow — третий хоткей панели, живёт по тем же правилам; отличается
+  // только тем, КАК ловится (фаза перехвата, см. отдельный эффект ниже).
+  const [followShortcut, setFollowShortcut] = useState(DEFAULT_FOLLOW_SHORTCUT)
 
   // Глобальный keydown-обработчик вешается один раз на mount (см. ниже),
   // поэтому ему нужен всегда актуальный снимок хоткеев через ref, а не
@@ -265,10 +269,12 @@ export function Overlay() {
     getSettings().then((s: Settings) => {
       setPasteShortcut(s.pasteShortcut)
       setCopyShortcut(s.copyShortcut)
+      setFollowShortcut(s.followShortcut)
     })
     const un = listen<Settings>('settings:changed', (e) => {
       setPasteShortcut(e.payload.pasteShortcut)
       setCopyShortcut(e.payload.copyShortcut)
+      setFollowShortcut(e.payload.followShortcut)
     })
     return () => {
       un.then((f) => f())
@@ -738,6 +744,49 @@ export function Overlay() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  // Follow — отдельный слушатель, и отдельный он ровно из-за ФАЗЫ.
+  //
+  // Обработчик выше висит на всплытии: Paste и Escape там разбираются так,
+  // что пока редактор в фокусе, клавиша принадлежит vim (см. длинный
+  // комментарий у него), а Copy проходит мимо vim просто потому, что
+  // Cmd-модификатора в грамматике vim не бывает. Follow не попадает ни в ту,
+  // ни в другую категорию: его дефолт — Ctrl+F, а `<C-f>` в vim это штатный
+  // моушен «страница вперёд» (node_modules/@replit/codemirror-vim-core/vim.js,
+  // строка 132). На всплытии до окна такое нажатие не дошло бы вовсе.
+  //
+  // Поэтому перехват, как в главном окне (MainWindow.tsx), — тот же приём,
+  // а не второй механизм: обычный window-keydown, тот же matchesShortcut, та
+  // же настройка. Плюс stopPropagation: preventDefault отменяет только
+  // действие браузера, а CodeMirror слушает keydown на своём contentDOM и
+  // прокрутил бы страницу всё равно — событие обязано остановиться здесь.
+  //
+  // Отобрать `<C-f>` у редактора не жалко по той же причине, по которой
+  // панель уже отобрала у него `<CR>` (там это было "j^"): в короткой
+  // надиктованной фразе листать страницами нечего.
+  //
+  // Голая клавиша сюда попасть не может — поле Follow в настройках требует
+  // модификатора (см. Settings.tsx): перехваченная так же, она отобрала бы у
+  // редактора обычный ввод.
+  //
+  // Эффект без списка зависимостей — намеренно, тот же приём, что в
+  // MainWindow.tsx: обработчик читает и хоткей, и `onFollow`, и перевесить
+  // один слушатель на каждый рендер честнее, чем держать ref на каждое из
+  // этих значений. Устаревшего замыкания при этом не бывает по построению.
+  useEffect(() => {
+    const onFollowKey = (e: KeyboardEvent) => {
+      // Слой «нет права на вставку» — модальный: пока он открыт, у панели
+      // ровно два выхода, и уводить текст в другое окно мимо него нельзя.
+      // Тот же guard, что у остальных действий в обработчике выше.
+      if (showAccessModal) return
+      if (!matchesShortcut(e, followShortcut)) return
+      e.preventDefault()
+      e.stopPropagation()
+      onFollow()
+    }
+    window.addEventListener('keydown', onFollowKey, true)
+    return () => window.removeEventListener('keydown', onFollowKey, true)
+  })
+
   // Текущее проигрывание — чтобы повторный Play/перемотка обрывали
   // предыдущее, а не накладывали звук на звук. offset/startedAt — точка
   // отсчёта позиции головки воспроизведения (часть 1): offset — секунда
@@ -1085,7 +1134,7 @@ export function Overlay() {
             прячется (см. onFollow / follow_to_main_window в Rust). Тот же
             guard на пустой текст, что у Paste/Copy. */}
         <button disabled={!hasText} onClick={onFollow}>
-          Follow
+          Follow <span className="shortcut-badge">{formatShortcutBadge(followShortcut)}</span>
         </button>
         {permissionPane && (
           <button onClick={() => openPrivacyPane(permissionPane)}>Open Settings</button>
