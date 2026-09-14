@@ -656,6 +656,26 @@ export function Settings() {
       </p>
 
       <label>
+        Capture selection
+        <ShortcutCapture
+          value={s.captureHotkey}
+          onChange={(accel) => patch({ captureHotkey: accel })}
+          requireModifier
+          modifierError={
+            'A global hotkey needs at least one modifier (Ctrl, Alt, Shift, or Cmd) — otherwise ' +
+            'it would capture this key in every app. Try a different combination.'
+          }
+          validate={conflictCheck('captureHotkey', validateHotkey)}
+        />
+      </label>
+      <p className="hint">
+        Select text in any app and press this to pull it into Slaive, where the AI actions can
+        work on it. The default <code>Ctrl + Cmd + Space</code> avoids Spotlight
+        (<code>Cmd + Space</code>) and input switching (<code>Ctrl + Space</code>). This needs the
+        same Accessibility permission as Paste.
+      </p>
+
+      <label>
         Paste shortcut
         <ShortcutCapture
           value={s.pasteShortcut}
