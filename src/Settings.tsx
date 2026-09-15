@@ -631,8 +631,8 @@ export function Settings() {
         Say "задеплоим на Kubernetes" and whisper writes "Кубернетес". Put the words you say in
         English here — one per line (or separated by commas, both work) — and they come back
         spelled the way you typed them. An empty field passes nothing to whisper at all. The field
-        is a Vim editor: press <code>i</code> to type, <code>Esc</code> to go back to commands,{' '}
-        <code>dd</code> to drop a term, <code>/</code> to search.
+        is a Vim editor and opens ready to type. Press <code>Esc</code> for commands —{' '}
+        <code>dd</code> to drop a term, <code>/</code> to search — and <code>i</code> to type again.
       </p>
       {/* Счётчик бюджета — единственное, что стоит между пользователем и
           тихой потерей терминов: whisper.cpp режет подсказку по 224 токенам

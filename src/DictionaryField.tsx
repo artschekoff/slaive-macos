@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { createTranscriptEditor, watchVimMode, type VimMode } from './transcript-editor'
+import { createTranscriptEditor, enterInsertMode, watchVimMode, type VimMode } from './transcript-editor'
 
 // Поле словаря терминов в настройках — ТОТ ЖЕ редактор, что в панели и в
 // главном окне (см. transcript-editor.ts): CodeMirror 6 + codemirror-vim,
@@ -49,7 +49,10 @@ type Props = {
 
 export function DictionaryField({ initialValue, onChange }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
-  const [vimMode, setVimMode] = useState<VimMode>('normal')
+  // 'insert', не 'normal': поле открывается уже в insert-режиме (см.
+  // enterInsertMode ниже) — этот дефолт лишь отражает то же самое состояние
+  // до первого срабатывания подписки watchVimMode.
+  const [vimMode, setVimMode] = useState<VimMode>('insert')
 
   // `onChange` держим в ref: эффект создания редактора должен выполниться
   // РОВНО один раз (CodeMirror пересоздавать на каждый рендер нельзя — это
@@ -76,6 +79,15 @@ export function DictionaryField({ initialValue, onChange }: Props) {
       placeholderText: 'React\nKubernetes\nDocker Compose',
     })
     const unwatch = watchVimMode(view, setVimMode)
+    // Подписка выше уже стоит, когда переключаем режим, — событие
+    // vim-mode-change из enterInsertMode долетит до неё, а не потеряется.
+    // См. докстринг enterInsertMode: поле выглядит обычным текстовым полем
+    // настроек, и NORMAL-режим по умолчанию был бы ловушкой — обычные буквы
+    // там команды (dd/S/x/cc меняют документ), и первое же нажатие в
+    // предположительно пустое поле могло стереть часть сида молча, до Save
+    // необратимо. Esc по-прежнему возвращает в NORMAL для тех, кто пользуется
+    // dd/j/k/`/` осознанно (см. хинт под полем в Settings.tsx).
+    enterInsertMode(view)
     // Ссылку на view наружу не держим — в отличие от оверлея и главного окна
     // тут её негде и незачем читать: текст уходит наверх сам, через onDocText.
     return () => {

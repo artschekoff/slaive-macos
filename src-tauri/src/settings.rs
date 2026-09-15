@@ -496,6 +496,25 @@ mod tests {
         );
     }
 
+    /// Диагностика жалобы «словарь пустеет после перезапуска»: командная
+    /// граница (`get_settings`/`save_settings` в commands.rs) здесь не
+    /// участвует, но тест бьёт по тому же пути (save → load), что и она —
+    /// `dictionary` живёт в ОДНОЙ структуре `Settings` с общей аннотацией
+    /// serde, а не в отдельной с другой формой, так что нестыковки регистра
+    /// полей между Rust и фронтендом здесь взяться неоткуда. Настоящая
+    /// причина была не здесь (см. commit message) — это сторожок на будущее,
+    /// с сидом полного размера, а не двумя строками, как у `round_trip` выше.
+    #[test]
+    fn full_seed_dictionary_survives_save_then_load() {
+        let dir = tmp();
+        let s = Settings::default();
+        assert_eq!(s.dictionary, DEFAULT_DICTIONARY);
+        save(&dir, &s).unwrap();
+        let loaded = load(&dir);
+        assert_eq!(loaded.dictionary, DEFAULT_DICTIONARY);
+        assert!(!loaded.dictionary.is_empty());
+    }
+
     /// Очищенный пользователем словарь не должен воскресать из сида: дефолт
     /// serde подставляется только при ОТСУТСТВИИ поля, а не при пустом.
     #[test]
