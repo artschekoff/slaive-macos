@@ -40,8 +40,24 @@ test('столкновение с глобальным хоткеем запис
   assert.equal(findShortcutConflict('Super+KeyT', 'fixShortcut', settings), 'Record hotkey')
 })
 
-test('столкновение двух оконных комбинаций тоже ловится', () => {
-  assert.equal(findShortcutConflict('Super+KeyK', 'shortenShortcut', settings), 'Ask AI')
+test('столкновение двух оконных комбинаций в одном окне тоже ловится', () => {
+  assert.equal(findShortcutConflict('Super+KeyK', 'shortenShortcut', settings), 'Ask AI (main window)')
+})
+
+test('два хоткея панели на одной комбинации конфликтуют', () => {
+  const withClash = { ...settings, copyShortcut: 'Super+KeyC', pasteShortcut: 'Super+KeyC' }
+  assert.equal(
+    findShortcutConflict('Super+KeyC', 'copyShortcut', withClash),
+    'Paste (panel)'
+  )
+})
+
+test('два хоткея главного окна на одной комбинации конфликтуют', () => {
+  const withClash = { ...settings, translateShortcut: 'Super+KeyZ', askAiShortcut: 'Super+KeyZ' }
+  assert.equal(
+    findShortcutConflict('Super+KeyZ', 'translateShortcut', withClash),
+    'Ask AI (main window)'
+  )
 })
 
 test('поле не конфликтует само с собой — переназначение на то же значение допустимо', () => {
@@ -69,12 +85,13 @@ test('дефолты приложения между собой не конфл�
   }
 })
 
-// Ровно тот случай, ради которого проверку просили расширить: Follow просили
-// на Ctrl+F, а Cmd+F в главном окне уже занят Fix. Похоже — но не одно и то
-// же, и полагаться на «это же разные окна» нельзя: findShortcutConflict
-// сравнивает строки и про окна ничего не знает.
-test('Follow на Ctrl+F не конфликтует с Fix на Cmd+F', () => {
-  assert.equal(settings.followShortcut, 'Ctrl+KeyF')
+// Ровно тот случай, ради которого проверку расширили областями: Follow (панель)
+// и Fix (главное окно) — обе дефолтные Cmd+F, одна и та же комбинация. Это не
+// столкновение: окна разные, в фокусе всегда одно, и вторая никогда не
+// сработает вместо первой — проверка теперь знает об этом через scope, а не
+// принимает «это же разные окна» на веру.
+test('Follow (панель) на Cmd+F не конфликтует с Fix (главное окно) на Cmd+F', () => {
+  assert.equal(settings.followShortcut, 'Super+KeyF')
   assert.equal(settings.fixShortcut, 'Super+KeyF')
   assert.equal(findShortcutConflict(settings.followShortcut, 'followShortcut', settings), null)
   // И обратно: Fix не считает себя занятым Follow'ом.
@@ -104,6 +121,21 @@ test('хоткей захвата участвует в проверке кон�
   assert.equal(
     findShortcutConflict(settings.captureHotkey, 'hotkey', settings),
     'Capture selection'
+  )
+})
+
+// Глобальный хоткей перехватывает клавишу системно, до окна событие не
+// доходит — он конфликтует с оконным хоткеем в ЛЮБОЙ области, panel или main,
+// и обе стороны обязаны видеть этот конфликт одинаково.
+test('глобальный хоткей конфликтует с оконным в обе стороны', () => {
+  const withClash = { ...settings, hotkey: 'Super+KeyZ', fixShortcut: 'Super+KeyZ' }
+  assert.equal(
+    findShortcutConflict('Super+KeyZ', 'fixShortcut', withClash),
+    'Record hotkey'
+  )
+  assert.equal(
+    findShortcutConflict('Super+KeyZ', 'hotkey', withClash),
+    'Fix (main window)'
   )
 })
 

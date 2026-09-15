@@ -97,13 +97,13 @@ export function formatShortcutBadge(accel: string): string {
 // перекрывают.
 export const DEFAULT_PASTE_SHORTCUT = 'Enter'
 export const DEFAULT_COPY_SHORTCUT = 'Super+KeyC'
-// Follow — «текст уезжает в главное окно». Ctrl+F, а не Cmd+F: Cmd+F в этом
-// же приложении уже занят действием Fix главного окна. Комбинации хранятся
-// разными строками ("Ctrl+KeyF" против "Super+KeyF"), поэтому проверка
-// столкновений (shortcut-conflicts.ts), которая сравнивает именно строки и
-// не смотрит на окно, их не путает — это проверено тестом, а не принято на
-// веру.
-export const DEFAULT_FOLLOW_SHORTCUT = 'Ctrl+KeyF'
+// Follow — «текст уезжает в главное окно». Cmd+F, хотя Cmd+F в этом же
+// приложении уже занят действием Fix главного окна: Follow живёт в панели,
+// Fix — в главном окне, а в фокусе всегда одно окно, поэтому одна и та же
+// комбинация в двух РАЗНЫХ окнах никогда не запускает оба сразу. Проверка
+// столкновений (shortcut-conflicts.ts) знает об этом через область (scope)
+// каждого поля — это проверено тестом, а не принято на веру.
+export const DEFAULT_FOLLOW_SHORTCUT = 'Super+KeyF'
 
 /** Человекочитаемая форма для текста кнопки захвата в настройках:
  * "Super+KeyC" -> "Cmd + C". Машинный формат хранится как есть. */

@@ -20,7 +20,9 @@ export type Settings = {
    *  (the panel's Follow button). Same scoping as pasteShortcut, but a
    *  modifier is required: the panel catches it on the capture phase and stops
    *  it there, so a bare key would be taken away from the Vim editor.
-   *  Default "Ctrl+KeyF" (Ctrl+F) — Cmd+F is already Fix in the main window. */
+   *  Default "Super+KeyF" (Cmd+F) — Cmd+F is also Fix in the main window, but
+   *  Follow lives in the panel and Fix in the main window, and only one
+   *  window is focused at a time, so the two never fire together. */
   followShortcut: string
   /** Window-level shortcuts for the main window's action menu (see
    *  action-shortcuts.ts). Same scoping as pasteShortcut/copyShortcut: they

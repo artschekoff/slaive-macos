@@ -87,9 +87,12 @@ pub struct Settings {
     /// Хоткей кнопки Follow в панели — «передать текст в главное окно».
     /// Та же оговорка, что у `paste_shortcut`/`copy_shortcut`: окно-локальный.
     /// В отличие от них требует модификатора (см. Settings.tsx): панель
-    /// ловит его на ФАЗЕ ПЕРЕХВАТА и гасит распространение, иначе Ctrl+F
-    /// достался бы vim (`<C-f>` — постраничная прокрутка), — а голая клавиша,
-    /// перехваченная так же, отобрала бы у редактора обычный ввод.
+    /// ловит его на ФАЗЕ ПЕРЕХВАТА и гасит распространение, иначе, например,
+    /// Ctrl+F достался бы vim (`<C-f>` — постраничная прокрутка), — а голая
+    /// клавиша, перехваченная так же, отобрала бы у редактора обычный ввод.
+    /// Дефолт совпадает с `fix_shortcut` (оба — Cmd+F): это не столкновение,
+    /// Follow живёт в панели, Fix — в главном окне, и в фокусе всегда только
+    /// одно из них.
     pub follow_shortcut: String,
     /// Хоткеи действий главного окна (Translate / Ask AI / Fix / Shorten /
     /// Summarize) — та же оговорка, что у `paste_shortcut`/`copy_shortcut`:
@@ -318,15 +321,13 @@ impl Default for Settings {
             paste_shortcut: "Enter".to_string(),
             // Cmd+C — стандартное системное сочетание для копирования.
             copy_shortcut: "Super+KeyC".to_string(),
-            // Ctrl+F — выбор пользователя: F от Follow, а Cmd+F в том же
-            // приложении уже занят Fix (`fix_shortcut` ниже). Комбинации
-            // РАЗНЫЕ строками ("Ctrl+KeyF" против "Super+KeyF"), поэтому
-            // проверка столкновений их не путает, и живут они к тому же в
-            // разных окнах. Ctrl взят осознанно: у vim `<C-f>` — постраничная
-            // прокрутка, но в короткой надиктованной фразе прокручивать
-            // нечего (тот же довод, по которому `<CR>` в normal-режиме
-            // панели переопределён с "j^" на Paste).
-            follow_shortcut: "Ctrl+KeyF".to_string(),
+            // Cmd+F — F от Follow, хотя в том же приложении уже занят Fix
+            // (`fix_shortcut` ниже) той же комбинацией. Не коллизия: Follow
+            // живёт в панели, Fix — в главном окне, а в фокусе всегда ровно
+            // одно окно, поэтому одна и та же комбинация в двух РАЗНЫХ окнах
+            // никогда не запускает оба сразу (см. область/scope в
+            // src/shortcut-conflicts.ts на фронтенде — это проверено тестом).
+            follow_shortcut: "Super+KeyF".to_string(),
             // Действия главного окна — все с Cmd: поле текста там это
             // CodeMirror с Vim, и голая клавиша (как и Ctrl-комбинация) была
             // бы отобрана у редактирования. В грамматике Vim модификатора
@@ -532,9 +533,10 @@ mod tests {
         assert_eq!(s.vad_model_path, None);
         assert_eq!(s.paste_shortcut, "Enter");
         assert_eq!(s.copy_shortcut, "Super+KeyC");
-        // Ctrl+F, а не Cmd+F: Cmd+F занят Fix. Строки разные — проверка
-        // столкновений (src/shortcut-conflicts.ts) их не путает.
-        assert_eq!(s.follow_shortcut, "Ctrl+KeyF");
+        // Cmd+F, тот же, что у Fix (fix_shortcut ниже) — не столкновение:
+        // Follow в панели, Fix в главном окне, проверка столкновений
+        // (src/shortcut-conflicts.ts) знает об этом через область поля.
+        assert_eq!(s.follow_shortcut, "Super+KeyF");
         assert_eq!(s.translate_shortcut, "Super+KeyL");
         assert_eq!(s.ask_ai_shortcut, "Super+KeyK");
         assert_eq!(s.fix_shortcut, "Super+KeyF");
@@ -581,11 +583,16 @@ mod tests {
     /// NaN не проходит ни одного сравнения, и `f32::clamp` на нём паникует —
     /// то есть настройки с `NaN` в файле роняли бы приложение на старте,
     /// а не просто выглядели бы странно.
-    /// Дефолтные комбинации не должны совпадать между собой. Ту же проверку
-    /// для комбинаций, которые назначил пользователь, делает фронтенд
-    /// (src/shortcut-conflicts.ts), но ДЕФОЛТЫ рождаются здесь и до той
-    /// проверки не доходят: сломать их правкой `Default` можно молча, а
-    /// наружу это выйдет как «кнопка перестала работать из коробки».
+    /// Дефолтные комбинации не должны совпадать между собой ВНУТРИ одной
+    /// области перехвата. Ту же проверку для комбинаций, которые назначил
+    /// пользователь, делает фронтенд (src/shortcut-conflicts.ts) — область
+    /// там называется `ShortcutScope`, и правило то же: 'global' занимает
+    /// клавишу системно, до окна события не доходит, и конфликтует с чем
+    /// угодно; 'panel' и 'main' — окна, в фокусе всегда только одно из них,
+    /// и одна и та же комбинация в разных окнах друг другу не мешает.
+    /// ДЕФОЛТЫ рождаются здесь и до фронтендовой проверки не доходят:
+    /// сломать их правкой `Default` можно молча, а наружу это выйдет как
+    /// «кнопка перестала работать из коробки».
     ///
     /// Escape (Back/Cancel в главном окне) в список не входит намеренно: он
     /// не хранится и назначить его на что-то ещё нельзя — ShortcutCapture
@@ -595,20 +602,25 @@ mod tests {
     fn default_shortcuts_do_not_collide() {
         let s = Settings::default();
         let all = [
-            ("hotkey", &s.hotkey),
-            ("pasteShortcut", &s.paste_shortcut),
-            ("copyShortcut", &s.copy_shortcut),
-            ("followShortcut", &s.follow_shortcut),
-            ("mainPasteShortcut", &s.main_paste_shortcut),
-            ("acceptShortcut", &s.accept_shortcut),
-            ("translateShortcut", &s.translate_shortcut),
-            ("askAiShortcut", &s.ask_ai_shortcut),
-            ("fixShortcut", &s.fix_shortcut),
-            ("shortenShortcut", &s.shorten_shortcut),
-            ("summarizeShortcut", &s.summarize_shortcut),
+            ("hotkey", &s.hotkey, "global"),
+            ("captureHotkey", &s.capture_hotkey, "global"),
+            ("pasteShortcut", &s.paste_shortcut, "panel"),
+            ("copyShortcut", &s.copy_shortcut, "panel"),
+            ("followShortcut", &s.follow_shortcut, "panel"),
+            ("mainPasteShortcut", &s.main_paste_shortcut, "main"),
+            ("acceptShortcut", &s.accept_shortcut, "main"),
+            ("translateShortcut", &s.translate_shortcut, "main"),
+            ("askAiShortcut", &s.ask_ai_shortcut, "main"),
+            ("fixShortcut", &s.fix_shortcut, "main"),
+            ("shortenShortcut", &s.shorten_shortcut, "main"),
+            ("summarizeShortcut", &s.summarize_shortcut, "main"),
         ];
-        for (i, (name_a, accel_a)) in all.iter().enumerate() {
-            for (name_b, accel_b) in all.iter().skip(i + 1) {
+        for (i, (name_a, accel_a, scope_a)) in all.iter().enumerate() {
+            for (name_b, accel_b, scope_b) in all.iter().skip(i + 1) {
+                let can_collide = *scope_a == "global" || *scope_b == "global" || scope_a == scope_b;
+                if !can_collide {
+                    continue;
+                }
                 assert_ne!(
                     accel_a, accel_b,
                     "дефолты {name_a} и {name_b} заняли одну комбинацию {accel_a}"
@@ -792,7 +804,7 @@ mod tests {
         let s = load(&dir);
         assert_eq!(s.paste_shortcut, "Enter");
         assert_eq!(s.copy_shortcut, "Super+KeyC");
-        assert_eq!(s.follow_shortcut, "Ctrl+KeyF");
+        assert_eq!(s.follow_shortcut, "Super+KeyF");
     }
 
     /// То же самое для хоткеев действий главного окна: файл, записанный до их
