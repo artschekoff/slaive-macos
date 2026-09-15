@@ -78,3 +78,44 @@ export function goBack(state: MenuState): MenuState {
   if (state.stack.length <= 1) return state
   return { stack: state.stack.slice(0, -1), prompt: null }
 }
+
+// ===== Выбор стрелками в столбце меню =====
+// Индекс выбранного пункта не часть MenuState (он не про то, ГДЕ в дереве
+// стоит пользователь, а про то, какая КНОПКА текущего уровня подсвечена под
+// стрелками) — живёт как React-состояние в MainWindow.tsx, а его переходы
+// вынесены сюда чистыми функциями по тому же принципу, что и весь этот файл:
+// без DOM их можно проверить юнит-тестом, а MainWindow.tsx только вызывает.
+
+/** Пункт вниз, с циклом с последнего на первый — то же поведение, что у
+ *  системных выпадающих меню macOS: в списке из одного-двух действий
+ *  стрелка без цикла упиралась бы в тупик через одно нажатие. `length <= 0`
+ *  — вырожденный случай (пустого уровня в этом дереве не бывает, но упасть
+ *  функция не должна), возвращает 0. */
+export function moveSelectionDown(index: number, length: number): number {
+  if (length <= 0) return 0
+  return index >= length - 1 ? 0 : index + 1
+}
+
+/** Пункт вверх, с тем же циклом в обратную сторону: с первого — на
+ *  последний. */
+export function moveSelectionUp(index: number, length: number): number {
+  if (length <= 0) return 0
+  return index <= 0 ? length - 1 : index - 1
+}
+
+/** Выбор при входе на новый уровень (провал в branch, возврат назад, смена
+ *  дерева) — всегда первый пункт: у свежего уровня нет "с какого пункта я
+ *  сюда пришёл", и вставать на начало списка — единственный вариант без
+ *  угадывания. */
+export function resetSelectionForLevel(): number {
+  return 0
+}
+
+/** Держит индекс в границах ТЕКУЩЕГО списка. Нужна на случай, когда состав
+ *  уровня изменился, а индекс остался от прежнего, более длинного списка —
+ *  список языков Translate правится в настройках (см. action-tree.ts) и
+ *  может стать короче тем же самым уровнем меню. */
+export function clampSelectionIndex(index: number, length: number): number {
+  if (length <= 0) return 0
+  return Math.min(Math.max(index, 0), length - 1)
+}

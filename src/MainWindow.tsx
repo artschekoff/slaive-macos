@@ -10,6 +10,10 @@ import {
   goBack,
   isRoot,
   menuDepth,
+  moveSelectionDown,
+  moveSelectionUp,
+  resetSelectionForLevel,
+  clampSelectionIndex,
   type MenuState,
 } from './menu-state'
 import { buildActionTree, DEFAULT_TRANSLATE_LANGUAGES, type LeafNode } from './action-tree'
@@ -101,6 +105,38 @@ export function MainWindow() {
   const [applyState, setApplyState] = useState<ApplyState>(idleApplyState)
   const [actionError, setActionError] = useState<string | null>(null)
   const [promptQuery, setPromptQuery] = useState('')
+
+  // Столбец меню действий, переключаемый стрелками (бриф: "все кнопки в
+  // меню... столбец... переключать стрелочками вверх и вниз", то же для
+  // языков Translate). Индекс — не часть MenuState (см. menu-state.ts): он
+  // не про то, где в дереве стоит пользователь, а про то, какая кнопка
+  // ТЕКУЩЕГО уровня подсвечена. Переходы (вниз/вверх/сброс на новом уровне)
+  // — чистые функции оттуда, проверенные без DOM; здесь только хранение и
+  // клавиши.
+  const [selectedIndex, setSelectedIndex] = useState(0)
+  // Контейнер списка — ЕДИНСТВЕННЫЙ tab-стоп уровня (aria-activedescendant
+  // паттерн listbox, см. отчёт): сами кнопки получают tabIndex={-1} и не
+  // участвуют в обходе Tab по отдельности. Ref переживает смену уровня (тот
+  // же DOM-узел не пересоздаётся React между рендерами одного уровня —
+  // пересоздаётся только при смене key у .mw-panel, см. ниже), поэтому
+  // .focus() из эффекта ниже всегда бьёт по актуальному контейнеру.
+  const gridRef = useRef<HTMLDivElement | null>(null)
+  // Поле свободного запроса Ask AI — та же роль в фокус-цикле, что у
+  // gridRef: единственное место, куда стоит вернуть фокус после Enter на
+  // ветке Ask AI в списке действий, иначе клавиатурный путь обрывался бы
+  // ровно на этой одной ветке (у остальных пунктов корня либо запускается
+  // действие сразу, либо открывается точно такой же список — подменю
+  // Translate).
+  const promptInputRef = useRef<HTMLInputElement | null>(null)
+  // Был ли фокус ВНУТРИ списка непосредственно перед тем, как уровень
+  // сменился (провал в Translate, возврат Back, завершение действия в
+  // корень). React убирает старый .mw-panel из дерева при смене key, а
+  // удаление сфокусированного узла НЕ порождает событие blur (стандартное
+  // поведение DOM) — ref, а не state, поэтому и остаётся true сквозь такое
+  // удаление, ровно то состояние, которое нужно эффекту ниже. Обычный уход
+  // фокуса (Tab на Paste, клик по полю текста) блюром сбрасывает его как
+  // положено.
+  const menuHadFocusRef = useRef(false)
   // Модальный слой «нет права на вставку» — тот же, что в оверлее, и по той
   // же причине: право одно на оба окна (Accessibility), отказ одинаков, и
   // показывается он СРАЗУ по нажатию Paste, а не после заведомо провальной
@@ -582,14 +618,26 @@ export function MainWindow() {
   const idlePanelKey = showingPrompt
     ? `prompt:${menuState.prompt!.id}`
     : `level:${depth}:${level.map((n) => n.id).join(',')}`
+  // Индекс под подсветкой стрелок, но всегда внутри границ ТЕКУЩЕГО level —
+  // clampSelectionIndex (menu-state.ts) страхует момент между тем, как
+  // список языков поменялся в настройках, и эффектом ниже, который сбросит
+  // selectedIndex на 0 для нового уровня.
+  const selectedGridIndex = clampSelectionIndex(selectedIndex, level.length)
   const idlePanelNode: ReactNode = showingPrompt ? (
     <>
       <input
+        ref={promptInputRef}
         className="mw-prompt-input"
         value={promptQuery}
         placeholder={menuState.prompt!.placeholder}
         disabled={!hasText}
         onChange={(e) => setPromptQuery(e.target.value)}
+        onFocus={() => {
+          menuHadFocusRef.current = true
+        }}
+        onBlur={() => {
+          menuHadFocusRef.current = false
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter') onPromptSubmit()
         }}
@@ -604,22 +652,91 @@ export function MainWindow() {
       </div>
     </>
   ) : (
-    // Сетка пунктов — только пункты. Раньше первой ячейкой в ней стоял
-    // ← Back, из-за чего он читался третьим вариантом выбора наравне с
-    // языками, а его место зависело от числа пунктов: в подменю из двух он
-    // слева сверху, в подменю из трёх уехал бы в другую ячейку. Нумерация
+    // Сетка пунктов — единый столбец (бриф: "все кнопки... столбец,
+    // переключаемый стрелочками"), .action-grid-1 вместо прежней
+    // .action-grid-2 — тот же грид-механизм, что у прочих сеток окна, просто
+    // с одной колонкой, строк ровно по числу пунктов level. Раньше первой
+    // ячейкой в ней стоял ← Back, из-за чего он читался третьим вариантом
+    // выбора наравне с языками — этого по-прежнему нет: Back живёт в
+    // .mw-trail отдельной строкой (см. ниже), а не в этом гриде. Нумерация
     // ⌘1…⌘9 при этом не менялась и не меняется — она всегда считалась по
     // индексу в `level`, куда Back не входил (см. shortcutFor).
-    <div className="action-grid action-grid-2">
+    //
+    // role="listbox"/"option" + aria-activedescendant — управляемый фокус
+    // одного составного виджета (ARIA APG: listbox с единственным tab-стопом
+    // на контейнере), а не по кнопке на tab-стоп (roving tabindex): бриф
+    // прямо описывает именно этот контракт — "контейнер — tab-стоп, стрелки
+    // двигают выбор внутри него, Home/End — к краям, выбранный пункт
+    // объявляется". Сами кнопки исключены из обхода Tab (tabIndex={-1}), их
+    // aria-selected рисует подсветку, а aria-activedescendant контейнера
+    // называет её AT-читалке — без него читалка знает, что фокус в списке, но
+    // не знает, какой пункт сейчас выбран.
+    <div
+      ref={gridRef}
+      className="action-grid action-grid-1"
+      role="listbox"
+      aria-label={currentLevelLabel(menuState) ?? 'Actions'}
+      tabIndex={0}
+      aria-activedescendant={
+        level.length > 0 ? `mw-option-${depth}-${level[selectedGridIndex].id}` : undefined
+      }
+      onFocus={() => {
+        menuHadFocusRef.current = true
+      }}
+      onBlur={() => {
+        menuHadFocusRef.current = false
+      }}
+      onKeyDown={(e) => {
+        if (level.length === 0) return
+        switch (e.key) {
+          case 'ArrowDown':
+            e.preventDefault()
+            setSelectedIndex((i) => moveSelectionDown(i, level.length))
+            return
+          case 'ArrowUp':
+            e.preventDefault()
+            setSelectedIndex((i) => moveSelectionUp(i, level.length))
+            return
+          case 'Home':
+            e.preventDefault()
+            setSelectedIndex(0)
+            return
+          case 'End':
+            e.preventDefault()
+            setSelectedIndex(level.length - 1)
+            return
+          case 'Enter': {
+            // Активирует подсвеченный пункт — тот же переход, что у клика по
+            // нему. Условие недоступности (пустой текст) то же самое, что у
+            // самих кнопок ниже (disabled={!hasText}).
+            if (!hasText) return
+            e.preventDefault()
+            const node = level[selectedGridIndex]
+            if (node.kind === 'leaf') onLeafClick(node)
+            else setMenuState(enterNode(menuState, node))
+            return
+          }
+        }
+      }}
+    >
       {level.map((node, i) => {
         // Бейдж рисуется из НАСТРОЙКИ (или из позиции в подменю), а не из
         // зашитой строки: поменял комбинацию в настройках — подпись на кнопке
         // поменялась вместе с тем, что реально срабатывает, потому что и то и
         // другое берётся из одного вызова shortcutFor.
         const accel = shortcutFor(node, i, atRoot, actionShortcuts)
+        const selected = i === selectedGridIndex
         return (
           <button
             key={node.id}
+            id={`mw-option-${depth}-${node.id}`}
+            role="option"
+            aria-selected={selected}
+            // Не отдельный tab-стоп (см. пояснение выше про контейнер) —
+            // мышь по-прежнему кликает кнопку напрямую, клавиатура работает
+            // через контейнер.
+            tabIndex={-1}
+            className={selected ? 'is-selected' : undefined}
             disabled={!hasText}
             onClick={() => (node.kind === 'leaf' ? onLeafClick(node) : setMenuState(enterNode(menuState, node)))}
           >
@@ -630,6 +747,28 @@ export function MainWindow() {
       })}
     </div>
   )
+
+  // Подсветка стрелками — сброс на первый пункт при смене уровня
+  // (resetSelectionForLevel всегда 0, см. menu-state.ts): "докуда долистал"
+  // не должно пережить провал в другой уровень или возврат назад — там
+  // другой состав кнопок.
+  useEffect(() => {
+    setSelectedIndex(resetSelectionForLevel())
+  }, [idlePanelKey])
+
+  // Возврат DOM-фокуса в меню после смены уровня, если он был там
+  // непосредственно перед сменой (см. menuHadFocusRef выше). Без этого
+  // стрелочная навигация обрывалась бы на каждом провале в Translate/Ask AI
+  // или возврате Back: React пересоздаёт .mw-panel по key (см. ниже), старый
+  // сфокусированный узел удаляется без blur, и фокус молча утекает в
+  // <body> — следующую стрелку уже некому поймать. Обычный уход фокуса
+  // (Tab на Paste, клик в поле текста) блюром сбрасывает флаг как положено,
+  // и это правило его не переопределяет.
+  useEffect(() => {
+    if (!menuHadFocusRef.current) return
+    if (showingPrompt) promptInputRef.current?.focus()
+    else gridRef.current?.focus()
+  }, [idlePanelKey, showingPrompt])
 
   // Уходящая панель уровня меню (для эффекта "старая уезжает влево/вправо,
   // новая приезжает с другой стороны" — бриф явно просит показывать ОБЕ

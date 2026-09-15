@@ -11,6 +11,10 @@ import {
   enterNode,
   goBack,
   menuDepth,
+  moveSelectionDown,
+  moveSelectionUp,
+  resetSelectionForLevel,
+  clampSelectionIndex,
 } from './menu-state.ts'
 
 test('root state starts at the root of ACTION_TREE and is flagged as root', () => {
@@ -124,4 +128,48 @@ test('root has no level label — there is nothing to go back to', () => {
   const s = rootMenuState()
   const translate = currentLevel(s).find((n) => n.id === 'translate')!
   assert.equal(currentLevelLabel(goBack(enterNode(s, translate))), null)
+})
+
+// ===== Выбор стрелками (см. бриф: "столбец, переключаемый вверх/вниз") =====
+
+test('moveSelectionDown steps forward through the list', () => {
+  assert.equal(moveSelectionDown(0, 5), 1)
+  assert.equal(moveSelectionDown(3, 5), 4)
+})
+
+test('moveSelectionDown from the last item wraps to the first', () => {
+  assert.equal(moveSelectionDown(4, 5), 0)
+})
+
+test('moveSelectionUp steps backward through the list', () => {
+  assert.equal(moveSelectionUp(4, 5), 3)
+  assert.equal(moveSelectionUp(1, 5), 0)
+})
+
+test('moveSelectionUp from the first item wraps to the last', () => {
+  assert.equal(moveSelectionUp(0, 5), 4)
+})
+
+test('moveSelectionDown/Up on a degenerate empty list stay at 0, not crash', () => {
+  assert.equal(moveSelectionDown(0, 0), 0)
+  assert.equal(moveSelectionUp(0, 0), 0)
+})
+
+test('resetSelectionForLevel always lands on the first item — the level just changed', () => {
+  assert.equal(resetSelectionForLevel(), 0)
+})
+
+test('clampSelectionIndex keeps a valid index unchanged', () => {
+  assert.equal(clampSelectionIndex(2, 5), 2)
+})
+
+test('clampSelectionIndex pulls an out-of-range index back inside a shorter list', () => {
+  // Список языков Translate мог сократиться в настройках, пока индекс ещё
+  // указывал на пункт, которого больше нет.
+  assert.equal(clampSelectionIndex(7, 3), 2)
+  assert.equal(clampSelectionIndex(-1, 3), 0)
+})
+
+test('clampSelectionIndex on an empty list is 0, not negative or NaN', () => {
+  assert.equal(clampSelectionIndex(4, 0), 0)
 })
