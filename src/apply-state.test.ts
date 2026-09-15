@@ -8,6 +8,7 @@ import {
   startRequest,
   receiveResult,
   receiveError,
+  isCurrentError,
   cancelApply,
   acceptApply,
 } from './apply-state.ts'
@@ -73,6 +74,40 @@ test('accept is a no-op outside the proposed phase', () => {
   assert.equal(acceptApply(idle), idle)
   const pending = startRequest('x', 1)
   assert.equal(acceptApply(pending), pending)
+})
+
+// isCurrentError — guard consulted by MainWindow's runRequest `.catch`, so a
+// "Cancelled." rejection from a cancelled/superseded request never paints
+// the error banner over text that arrived correctly (see the brief's second
+// defect: false "Cancelled." under captured text).
+
+test('isCurrentError: false once the request was cancelled (applyState already back to idle)', () => {
+  const pending = startRequest('original text', 1)
+  // Cancel уже перевёл состояние в idle СИНХРОННО, до того как отменённый
+  // промис успел долететь до .catch — ровно порядок onCancel/follow:text.
+  const cancelledState = cancelApply(pending)
+  assert.equal(isCurrentError(cancelledState, 1), false)
+})
+
+test('isCurrentError: false once a new request superseded the old one', () => {
+  const firstPending = startRequest('original text', 1)
+  const cancelledThenRestarted = startRequest('new text', 2)
+  // Ответ на requestId 1 долетает уже после того, как запрос 2 стартовал.
+  void firstPending
+  assert.equal(isCurrentError(cancelledThenRestarted, 1), false)
+})
+
+test('isCurrentError: true for a genuine failure of the still-current request', () => {
+  const pending = startRequest('original text', 1)
+  // Ничего не отменяло и не заменяло этот запрос — applyState всё ещё pending
+  // с тем же requestId, когда пришёл отказ (сеть, ключ, провайдер).
+  assert.equal(isCurrentError(pending, 1), true)
+})
+
+test('isCurrentError: false outside the pending phase entirely (idle, proposed)', () => {
+  assert.equal(isCurrentError(idleApplyState(), 1), false)
+  const proposed = receiveResult(startRequest('x', 1), 1, 'y')
+  assert.equal(isCurrentError(proposed, 1), false)
 })
 
 test('original is preserved byte for byte through the whole pending/proposed cycle', () => {

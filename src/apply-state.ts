@@ -54,6 +54,25 @@ export function receiveError(state: ApplyState, requestId: number): ApplyState {
   return { phase: 'idle' }
 }
 
+/** Решает, принадлежит ли ошибка ЕЩЁ ТЕКУЩЕМУ запросу — та же проверка
+ *  requestId, что внутри receiveResult/receiveError, но без перехода
+ *  состояния: вызывающей стороне (MainWindow, `.catch` в runRequest) нужно
+ *  решить, рисовать ли баннер ошибки, а не менять фазу — это делает
+ *  receiveError отдельно.
+ *
+ *  `false` означает, что запрос к этому моменту уже не pending с этим
+ *  requestId — Cancel (кнопка, Escape, follow:text) перевёл цикл в idle
+ *  раньше, чем пришёл ответ, либо успел стартовать следующий запрос. Ответ в
+ *  обоих случаях принадлежит циклу, которого больше нет, и баннер о нём был
+ *  бы неправдой ("Cancelled." под текстом, который пришёл верным).
+ *
+ *  `true` означает, что это всё ещё ТОТ САМЫЙ запрос, который сейчас ждут —
+ *  и если он упал (сеть, ключ, провайдер), об этом обязаны сказать.
+ */
+export function isCurrentError(state: ApplyState, requestId: number): boolean {
+  return state.phase === 'pending' && state.requestId === requestId
+}
+
 /** Cancel — из ожидания или из предложенного результата, оба одинаково
  *  завершают цикл. Вызывающая сторона применяет `original` в редактор в
  *  обоих случаях (во время pending текст и так уже оригинал — применение

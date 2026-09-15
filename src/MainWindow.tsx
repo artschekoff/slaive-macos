@@ -22,6 +22,7 @@ import {
   startRequest,
   receiveResult,
   receiveError,
+  isCurrentError,
   cancelApply,
   acceptApply,
   type ApplyState,
@@ -342,8 +343,24 @@ export function MainWindow() {
         setApplyState((prev) => receiveResult(prev, id, result))
       })
       .catch((e) => {
+        // "Cancelled." приходит сюда же, что и настоящий отказ провайдера:
+        // и follow:text, и onCancel рвут запрос через cancelAiAction(), и
+        // run_ai_action на этом возвращает Err("Cancelled."), а промис здесь
+        // — тот же самый, что у .then выше, catch общий на оба пути. Раньше
+        // баннер рисовался безусловно, и получалось "Cancelled." под
+        // текстом, который на самом деле пришёл верным: ни одна из этих
+        // отмен не была неудачей.
+        //
+        // isCurrentError — та же проверка requestId, что внутри
+        // receiveResult/receiveError (см. apply-state.ts), только без
+        // побочного перехода состояния: нужно решить, рисовать ли баннер,
+        // ДО того как applyState перейдёт в idle. applyStateRef, а не
+        // замыкание рендера, которому принадлежит этот `.catch`, — та же
+        // причина, по которой follow:text ниже читает его же: к моменту,
+        // когда ответ долетел, могло пройти сколько угодно рендеров.
+        const isCurrent = isCurrentError(applyStateRef.current, id)
         setApplyState((prev) => receiveError(prev, id))
-        setActionError(String(e))
+        if (isCurrent) setActionError(String(e))
       })
   }
 
