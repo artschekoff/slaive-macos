@@ -189,10 +189,25 @@ export function resetEditorContent(view: EditorView, text: string) {
 }
 
 /** Возврат редактора в normal-режим — общая часть замены содержимого и
- *  дозаписи (см. `appendTranscript`). */
+ *  дозаписи (см. `appendTranscript`).
+ *
+ *  `Vim.exitVisualMode(cm, false)` — второй аргумент (`moveHead`) обязателен
+ *  именно `false`, а не дефолт. По умолчанию exitVisualMode переставляет
+ *  курсор на `vim.sel.head` — собственную копию позиции, которую vim ведёт
+ *  ПОКА обрабатывает свои же клавиши (visual-mode моушены). Наш dispatch
+ *  выше приходит В ОБХОД этого механизма (обычный `view.dispatch`, а не
+ *  `Vim.handleKey`), поэтому `vim.sel` на этот момент — снимок ДО правки,
+ *  ссылающийся на позиции в старом документе. С дефолтным moveHead
+ *  exitVisualMode тихо перезаписал бы курсор, который мы только что
+ *  поставили (см. `appendTranscript`), этим самым стухшим снимком —
+ *  ровно тот случай "выглядит как работающая фича, а на деле нет" из
+ *  отчёта. `false` отключает этот перезаход: exitVisualMode выходит из
+ *  режима, курсора не касается. Проверено по исходнику пакета
+ *  (node_modules/@replit/codemirror-vim-core/vim.js, exitVisualMode —
+ *  `if (moveHead !== false) cm.setCursor(...)`). */
 function normalizeVimMode(view: EditorView) {
   const cm = getCM(view)
-  if (cm?.state.vim?.visualMode) Vim.exitVisualMode(cm as CodeMirrorV)
+  if (cm?.state.vim?.visualMode) Vim.exitVisualMode(cm as CodeMirrorV, false)
   if (cm?.state.vim?.insertMode) Vim.exitInsertMode(cm as CodeMirrorV)
 }
 
@@ -222,44 +237,104 @@ export function enterInsertMode(view: EditorView) {
   if (cm) Vim.handleKey(cm, 'i', 'mapping')
 }
 
-/** Разделитель между уже накопленным текстом и новой добавкой при дозаписи.
- *  Пусто, если склеивать не с чем или прежний текст уже кончается пробельным
+/** Разделитель СЛЕВА от добавки — между текстом, что стоит ДО точки вставки
+ *  (`before`), и самой добавкой. Пусто, если склеивать не с чем (перед
+ *  точкой вставки ничего нет) или `before` уже кончается пробельным
  *  символом (включая перенос строки, который пользователь поставил сам): не
  *  создаём двойной пробел и не склеиваем слова. */
-export function appendSeparator(existing: string, addition: string): string {
-  if (!existing || !addition) return ''
-  return /\s$/.test(existing) ? '' : ' '
+export function appendSeparator(before: string, addition: string): string {
+  if (!before || !addition) return ''
+  return /\s$/.test(before) ? '' : ' '
 }
 
-/** Чистая склейка текста при дозаписи — вынесена отдельно от работы с
- *  редактором, чтобы поддавалась тесту без DOM. Добавка обрезается по краям:
- *  whisper отдаёт сегменты с ведущим пробелом, и без trim в накопленном
- *  тексте копились бы двойные пробелы. */
-export function joinTranscript(existing: string, addition: string): string {
+/** Зеркало `appendSeparator` — разделитель СПРАВА от добавки, между самой
+ *  добавкой и текстом, что стоит ПОСЛЕ точки вставки (`after`). Та же логика,
+ *  та же причина, другая сторона: пусто, если после точки вставки ничего
+ *  нет (курсор в конце документа) или `after` уже НАЧИНАЕТСЯ пробельным
+ *  символом. `addition` сюда приходит уже обрезанной по краям (см.
+ *  `insertTranscriptAt`), поэтому проверять её конец на пробел не нужно —
+ *  его там структурно не может быть. */
+export function prependSeparator(after: string, addition: string): string {
+  if (!after || !addition) return ''
+  return /^\s/.test(after) ? '' : ' '
+}
+
+/** Что вставить в позицию курсора/выделения и куда после этого поставить
+ *  каретку — чистая функция, вынесена из работы с редактором, чтобы
+ *  поддавалась тесту без DOM. `from`/`to` — диапазон, который вставка
+ *  заменяет (`from === to`, когда ничего не выделено, — обычный курсор;
+ *  `from < to` — выделение, и оно заменяется целиком, а не раздвигается).
+ *
+ *  Раньше (`joinTranscript`) добавка всегда клеилась в конец документа,
+ *  поэтому разделитель нужен был только один — со стороны уже
+ *  накопленного текста. Вставка в произвольную точку ломает это
+ *  допущение: слева от точки вставки и справа от неё — два РАЗНЫХ куска
+ *  существующего текста, и у каждого свой сосед по добавке. Вставка
+ *  между словами (например курсор в пробеле "привет | мир") и вставка в
+ *  середину слова ("hello|world", пробелов нет ни слева, ни справа) не
+ *  разведены веткой if — это один и тот же чек "не пробел ли уже там",
+ *  просто гонится независимо в обе стороны через appendSeparator/
+ *  prependSeparator.
+ *
+ *  Курсор после вставки — СРАЗУ ЗА добавленным куском (`add`), не считая
+ *  правого разделителя: тот отделяет добавку от старого текста, а не
+ *  является частью того, что надиктовал пользователь. Если этого не
+ *  делать, а ставить каретку в конец `insert`, вторая дозапись подряд
+ *  вставала бы ПЕРЕД пробелом-разделителем первой, а не после неё.
+ *
+ *  Добавка обрезается по краям: whisper отдаёт сегменты с ведущим
+ *  пробелом, и без trim по обе стороны точки вставки копились бы двойные
+ *  пробелы. Пустая (или состоящая из пробелов) добавка не должна трогать
+ *  документ вообще — сигнал об этом: пустой `insert` и `cursor === from`
+ *  (вызывающий код обязан пропустить dispatch, см. `appendTranscript`). */
+export function insertTranscriptAt(
+  existing: string,
+  addition: string,
+  from: number,
+  to: number
+): { insert: string; cursor: number } {
   const add = addition.trim()
-  if (!add) return existing
-  return existing + appendSeparator(existing, add) + add
+  if (!add) return { insert: '', cursor: from }
+  const before = existing.slice(0, from)
+  const after = existing.slice(to)
+  const leftSep = appendSeparator(before, add)
+  const rightSep = prependSeparator(after, add)
+  return { insert: leftSep + add + rightSep, cursor: from + leftSep.length + add.length }
 }
 
-/** Дописывает фрагмент В КОНЕЦ документа редактора, ничего в нём не заменяя.
+/** Дописывает фрагмент в позицию курсора (или вместо выделения), ничего
+ *  больше в документе не трогая.
  *
  *  Правки пользователя не теряются структурно, а не по договорённости:
- *  единственное изменение, которое уходит в редактор, — вставка в позицию
- *  `doc.length`. Диапазона, который мог бы затереть уже набранное, в этом
- *  dispatch просто нет (сравни с `resetEditorContent`, где `from: 0`).
- *  Дописываем в конец, а не в позицию курсора: в Vim-режиме курсор стоит
- *  там, где человек последний раз навигировал, и вставка туда была бы
- *  неожиданной. Конец предсказуем.
+ *  единственное изменение, которое уходит в редактор, — вставка в диапазон
+ *  [from, to), а не полная замена документа (сравни с `resetEditorContent`,
+ *  где `from: 0, to: doc.length`). Всё, что вне этого диапазона, dispatch
+ *  вообще не видит.
  *
- *  Пустая (или состоящая из пробелов) добавка не трогает документ вообще. */
+ *  `from`/`to` берутся из `view.state.selection.main` — ТЕКУЩЕГО состояния
+ *  редактора в момент, когда пришла расшифровка, а не какого-то дефолта.
+ *  Между началом записи и этим вызовом (см. rec:start в Overlay.tsx —
+ *  ветка `append`) обработчики уровня/статуса/размера окна ни разу не
+ *  делают dispatch в этот view, так что к моменту вставки здесь лежит
+ *  именно то место, где пользователь остановился, — а не сброшенное в
+ *  начало или в конец за время записи.
+ *
+ *  Раньше вставка всегда шла в конец документа (аргумент был — в Vim
+ *  normal-режиме курсор стоит там, где человек последний раз навигировал,
+ *  и вставка туда была бы неожиданной). Пользователь поработал с этим
+ *  поведением и попросил обратное: вставлять туда, где стоит курсор —
+ *  это и обжитый опыт весомее исходной теории, конец был лишь предсказуем,
+ *  не удобен.
+ *
+ *  Пустая (или состоящая из пробелов) добавка не трогает документ вообще —
+ *  ни выделение при этом не сбрасывается, ни курсор не двигается. */
 export function appendTranscript(view: EditorView, addition: string) {
-  const add = addition.trim()
-  if (!add) return
-  const at = view.state.doc.length
-  const insert = appendSeparator(view.state.doc.toString(), add) + add
+  const { from, to } = view.state.selection.main
+  const { insert, cursor } = insertTranscriptAt(view.state.doc.toString(), addition, from, to)
+  if (!insert) return
   view.dispatch({
-    changes: { from: at, insert },
-    selection: { anchor: at + insert.length },
+    changes: { from, to, insert },
+    selection: { anchor: cursor },
   })
   // Тот же возврат в normal, что и у resetEditorContent, и по той же причине:
   // после появления нового текста режим предыдущего цикла наследовать нельзя.
