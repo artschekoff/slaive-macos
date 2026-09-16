@@ -349,3 +349,21 @@ export function watchVimMode(view: EditorView, onModeChange: (mode: VimMode) => 
   cm?.on('vim-mode-change', handler)
   return () => cm?.off('vim-mode-change', handler)
 }
+
+/** Ждёт ли vim СЕЙЧАС аргумент-моушен для оператора (`d`, `c`, `y`, `>`...
+ *  уже нажаты, стрелка/hjkl — следующая клавиша, которую он проглотит как
+ *  свой аргумент). Нужна главному окну (см. arrow-routing.ts): пока такой
+ *  оператор висит, `vim-mode-change` НЕ шлёт отдельного режима — `mode`
+ *  остаётся `'normal'`, хотя стрелка сейчас принадлежит редактору, а не
+ *  списку действий сверху.
+ *
+ *  Проверено по исходнику пакета (@replit/codemirror-vim-core/vim.js):
+ *  `inputState.operator` — то самое поле, которое движок сам читает, решая,
+ *  в каком контексте клавиш он сейчас находится (`context = "operatorPending"`,
+ *  см. функцию, строящую keymap-контекст) — не догадка о частностях
+ *  реализации, а то же самое условие, что использует сам vim. */
+export function hasPendingVimOperator(view: EditorView | null): boolean {
+  if (!view) return false
+  const cm = getCM(view)
+  return !!cm?.state.vim?.inputState?.operator
+}

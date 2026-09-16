@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import {
   clearHistory,
   deleteHistoryEntry,
@@ -6,6 +6,8 @@ import {
   type HistoryEntry,
 } from './api'
 import { formatDuration, formatEntryDate, previewText } from './history'
+import { clampSelectionIndex } from './menu-state'
+import { moveGridDown, moveGridLeft, moveGridRight, moveGridUp } from './history-grid-nav'
 
 /** История расшифровок — сетка плиток внутри главного окна, на месте дерева
  *  действий (см. MainWindow.tsx). Отдельный файл, а не ещё двести строк в
@@ -20,12 +22,45 @@ import { formatDuration, formatEntryDate, previewText } from './history'
  *  Приватность: ни одна строка ниже ничего не пишет в консоль — то же
  *  правило, что и на стороне Rust. В `console.error` уходит только причина
  *  отказа от бэкенда, без содержимого записей. */
-export function HistoryView({ onPick }: { onPick: (entry: HistoryEntry) => void }) {
+export function HistoryView({
+  onPick,
+  arrowsAvailable,
+}: {
+  onPick: (entry: HistoryEntry) => void
+  // Достаются ли сейчас стрелки/Home/End сетке БЕЗ настоящего DOM-фокуса на
+  // ней — та же проверка (режим Vim + отложенный оператор), что и у столбца
+  // действий, вычисленная в MainWindow.tsx (см. arrow-routing.ts и отчёт).
+  // Функция, а не готовое булево значение: пересчитывается на каждое
+  // нажатие, потому что "ждёт ли vim аргумент оператора" меняется без
+  // ре-рендера React — замороженный на момент рендера ответ мог бы соврать.
+  arrowsAvailable: () => boolean
+}) {
   // null — ещё грузим; [] — история пуста. Разные вещи: у пустой истории
   // своё объяснение, а мигать им, пока читается файл, незачем.
   const [entries, setEntries] = useState<HistoryEntry[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [confirmingClear, setConfirmingClear] = useState(false)
+  // Подсветка стрелками в сетке — тот же принцип, что и selectedIndex в
+  // MainWindow.tsx (см. отчёт): не часть данных истории, а то, какая плитка
+  // сейчас выбрана клавиатурой.
+  const [selectedIndex, setSelectedIndex] = useState(0)
+  const count = entries?.length ?? 0
+  // Индекс всегда в границах ТЕКУЩЕГО списка — та же подстраховка, что у
+  // clampSelectionIndex в MainWindow: удаление плитки (см. onDelete ниже)
+  // может оставить selectedIndex указывающим за конец укоротившегося списка
+  // ДО того, как следующий рендер успеет его поправить.
+  const selectedGridIndex = clampSelectionIndex(selectedIndex, count)
+  // Контейнер сетки — единственный tab-стоп (тот же паттерн listbox, что у
+  // столбца действий в MainWindow.tsx): плитки открытия получают
+  // tabIndex={-1}, крестик удаления — тоже (см. ниже), чтобы Tab уводил из
+  // истории целиком, а не блуждал по 2×N кнопкам внутри неё.
+  const gridRef = useRef<HTMLDivElement | null>(null)
+  // DOM-узел ВЫБРАННОЙ клавиатурой плитки — чтобы подтягивать её в видимую
+  // область (сетка прокручивается на двухстах записях, см. её собственный
+  // комментарий ниже про потолок истории). Ставится в JSX через тернарник
+  // (см. рендер), а не на каждой плитке безусловно — только одна плитка за
+  // раз бывает выбрана.
+  const selectedTileRef = useRef<HTMLDivElement | null>(null)
 
   // Читаем на монтировании — то есть каждый раз, когда историю открывают
   // заново: за время, что она была закрыта, в неё успели дописаться новые
@@ -38,6 +73,100 @@ export function HistoryView({ onPick }: { onPick: (entry: HistoryEntry) => void 
         setError(String(e))
       })
   }, [])
+
+  // Индекс подстраивается под РЕАЛЬНЫЙ размер списка каждый раз, когда тот
+  // меняется (первая загрузка, удаление одной записи, полная очистка) — тем
+  // же clampSelectionIndex, что и подстраховка выше, но здесь он не просто
+  // страхует рендер, а фиксирует новое значение в состоянии: иначе после
+  // удаления последней в списке плитки selectedIndex остался бы указывать
+  // на несуществующий хвост до следующего нажатия стрелки.
+  useEffect(() => {
+    setSelectedIndex((i) => clampSelectionIndex(i, count))
+  }, [count])
+
+  // Выбранная плитка подтягивается в видимую область сетки при каждом
+  // переходе — без этого стрелочная навигация молча уходила бы за пределы
+  // прокрученной области на длинной истории, и подсветка становилась бы
+  // невидимой (тот же дефект, от которого предостерегает отчёт про сам факт
+  // видимости выбора).
+  useEffect(() => {
+    selectedTileRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [selectedGridIndex])
+
+  // Число колонок сетки — читается из реального computed-стиля, а не
+  // зашито константой: .history-grid использует auto-fill (см. styles.css),
+  // число колонок зависит от ширины окна и может отличаться от "трёх при
+  // 720px" из её собственного комментария, если окно когда-нибудь станет
+  // resizable. Читается заново на каждое нажатие Вверх/Вниз, а не кэшируется
+  // — дешевле и честнее, чем следить за resize отдельным слушателем.
+  const currentColumns = (): number => {
+    const el = gridRef.current
+    if (!el) return 1
+    const cols = getComputedStyle(el).gridTemplateColumns.split(' ').filter(Boolean).length
+    return cols > 0 ? cols : 1
+  }
+
+  // Общая логика клавиш сетки — используется и собственным onKeyDown
+  // контейнера (когда на нём уже настоящий DOM-фокус, путь Tab), и оконным
+  // слушателем ниже (путь без Tab, см. его комментарий). Enter внутри неё —
+  // намеренно: этой веткой пользуется ТОЛЬКО фокусный путь, оконный
+  // слушатель Enter к ней не пропускает (см. его собственный комментарий,
+  // причина та же, что и в MainWindow.tsx про slaivePaste).
+  const handleGridKey = (e: KeyboardEvent | ReactKeyboardEvent<HTMLDivElement>): boolean => {
+    if (count === 0) return false
+    const cols = currentColumns()
+    switch (e.key) {
+      case 'ArrowDown':
+        setSelectedIndex((i) => moveGridDown(clampSelectionIndex(i, count), count, cols))
+        return true
+      case 'ArrowUp':
+        setSelectedIndex((i) => moveGridUp(clampSelectionIndex(i, count), count, cols))
+        return true
+      case 'ArrowRight':
+        setSelectedIndex((i) => moveGridRight(clampSelectionIndex(i, count), count))
+        return true
+      case 'ArrowLeft':
+        setSelectedIndex((i) => moveGridLeft(clampSelectionIndex(i, count), count))
+        return true
+      case 'Home':
+        setSelectedIndex(0)
+        return true
+      case 'End':
+        setSelectedIndex(count - 1)
+        return true
+      case 'Enter': {
+        const entry = entries?.[selectedGridIndex]
+        if (entry) onPick(entry)
+        return true
+      }
+      default:
+        return false
+    }
+  }
+
+  // Стрелки/Home/End без предварительного Tab — тот же механизм и та же
+  // причина, что у столбца действий в MainWindow.tsx (см. arrow-routing.ts и
+  // отчёт): пока сетка ещё не получила настоящий DOM-фокус, эти клавиши
+  // достаются ей только когда Vim в NORMAL и не ждёт моушен оператора.
+  // Guard по document.activeElement — чтобы не удваивать шаг, когда фокус
+  // УЖЕ на сетке (тогда клавишу и так поймает её собственный onKeyDown ниже
+  // через обычный bubble). Enter сюда не пропускается тем же самым guard'ом
+  // (`e.key === 'Enter'` в самом начале) — по той же причине, что и в
+  // MainWindow.tsx: первое же Вверх/Вниз/Home/End переводит фокус на сетку
+  // по-настоящему, и дальше Enter достаётся её НЕИЗМЕНЁННОМУ обработчику.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Enter') return
+      if (document.activeElement === gridRef.current) return
+      if (!arrowsAvailable()) return
+      if (handleGridKey(e)) {
+        e.preventDefault()
+        gridRef.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  })
 
   // Подтверждение очистки не должно быть ловушкой — Escape закрывает его, как
   // и слой «нет права на вставку» в обоих окнах.
@@ -93,8 +222,6 @@ export function HistoryView({ onPick }: { onPick: (entry: HistoryEntry) => void 
       })
   }
 
-  const count = entries?.length ?? 0
-
   return (
     <div className="mw-history">
       {error && (
@@ -131,34 +258,66 @@ export function HistoryView({ onPick }: { onPick: (entry: HistoryEntry) => void 
       {/* Плитка — для УЗНАВАНИЯ, а не для чтения: дата, длительность и начало
           текста. Полный текст кладётся в редактор по нажатию.
           ponytail: поиска по тексту нет — двести записей просматриваются
-          глазами; добавить, если потолок истории когда-нибудь поднимут. */}
+          глазами; добавить, если потолок истории когда-нибудь поднимут.
+
+          role="listbox"/"option" + aria-activedescendant — тот же
+          управляемый фокус одного составного виджета, что у столбца
+          действий в MainWindow.tsx (см. её комментарий и отчёт): контейнер
+          — единственный tab-стоп, кнопки открытия исключены из обхода Tab
+          (tabIndex={-1}), крестик удаления — тоже (см. отчёт: он не должен
+          становиться отдельной остановкой в обходе стрелками — только
+          мышь/клик). Клавиатурного удаления в этой версии нет: цена ошибки
+          у необратимого действия слишком высока, чтобы вешать его на
+          клавишу рядом со стрелками навигации без явного запроса на это. */}
       {count > 0 && (
-        <div className="history-grid">
-          {entries!.map((entry) => (
-            <div className="history-tile" key={entry.id}>
-              <button
-                className="history-tile-open"
-                onClick={() => onPick(entry)}
-                title="Put this transcript back into the editor"
+        <div
+          ref={gridRef}
+          className="history-grid"
+          role="listbox"
+          aria-label="Transcript history"
+          tabIndex={0}
+          aria-activedescendant={`history-option-${entries![selectedGridIndex].id}`}
+          onKeyDown={(e) => {
+            if (handleGridKey(e)) e.preventDefault()
+          }}
+        >
+          {entries!.map((entry, i) => {
+            const selected = i === selectedGridIndex
+            return (
+              <div
+                className={`history-tile${selected ? ' is-selected' : ''}`}
+                key={entry.id}
+                ref={selected ? selectedTileRef : undefined}
               >
-                <span className="history-tile-head">
-                  {/* id — это и есть время создания в UTC-миллисекундах (см.
-                      history.rs); показываем его в местном времени. */}
-                  <span className="history-tile-date">{formatEntryDate(entry.id)}</span>
-                  <span className="shortcut-badge">{formatDuration(entry.durationSecs)}</span>
-                </span>
-                <span className="history-tile-text">{previewText(entry.text)}</span>
-              </button>
-              <button
-                className="history-tile-delete"
-                onClick={() => onDelete(entry)}
-                title="Delete this transcript"
-                aria-label="Delete this transcript"
-              >
-                ×
-              </button>
-            </div>
-          ))}
+                <button
+                  id={`history-option-${entry.id}`}
+                  role="option"
+                  aria-selected={selected}
+                  tabIndex={-1}
+                  className="history-tile-open"
+                  onClick={() => onPick(entry)}
+                  title="Put this transcript back into the editor"
+                >
+                  <span className="history-tile-head">
+                    {/* id — это и есть время создания в UTC-миллисекундах (см.
+                        history.rs); показываем его в местном времени. */}
+                    <span className="history-tile-date">{formatEntryDate(entry.id)}</span>
+                    <span className="shortcut-badge">{formatDuration(entry.durationSecs)}</span>
+                  </span>
+                  <span className="history-tile-text">{previewText(entry.text)}</span>
+                </button>
+                <button
+                  className="history-tile-delete"
+                  tabIndex={-1}
+                  onClick={() => onDelete(entry)}
+                  title="Delete this transcript"
+                  aria-label="Delete this transcript"
+                >
+                  ×
+                </button>
+              </div>
+            )
+          })}
         </div>
       )}
 

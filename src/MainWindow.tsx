@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import type { EditorView } from '@codemirror/view'
-import { createTranscriptEditor, resetEditorContent, watchVimMode, type VimMode } from './transcript-editor'
+import {
+  createTranscriptEditor,
+  resetEditorContent,
+  watchVimMode,
+  hasPendingVimOperator,
+  type VimMode,
+} from './transcript-editor'
+import { arrowsControlList } from './arrow-routing'
 import {
   rootMenuState,
   currentLevel,
@@ -122,6 +129,14 @@ export function MainWindow() {
   // пересоздаётся только при смене key у .mw-panel, см. ниже), поэтому
   // .focus() из эффекта ниже всегда бьёт по актуальному контейнеру.
   const gridRef = useRef<HTMLDivElement | null>(null)
+  // Достаются ли сейчас стрелки/Home/End списку БЕЗ настоящего DOM-фокуса на
+  // нём (см. arrow-routing.ts и отчёт) — общая проверка для столбца действий
+  // здесь и для сетки истории в HistoryView (передаётся туда пропом ниже).
+  // Пересчитывается на каждое нажатие, а не запоминается в состоянии:
+  // hasPendingVimOperator читает внутренности vim, которые меняются БЕЗ
+  // ре-рендера React, — застывшее значение из прошлого рендера могло бы
+  // соврать про то, ждёт ли редактор аргумент оператора прямо сейчас.
+  const arrowsAvailable = () => arrowsControlList(vimMode, hasPendingVimOperator(viewRef.current))
   // Поле свободного запроса Ask AI — та же роль в фокус-цикле, что у
   // gridRef: единственное место, куда стоит вернуть фокус после Enter на
   // ветке Ask AI в списке действий, иначе клавиатурный путь обрывался бы
@@ -614,6 +629,55 @@ export function MainWindow() {
       if (showHistory) return
 
       if (!hasText || applyState.phase !== 'idle' || showingPrompt) return
+
+      // Стрелки/Home/End БЕЗ предварительного Tab — см. arrow-routing.ts и
+      // отчёт. Работает только пока список ЕЩЁ не получил настоящий
+      // DOM-фокус: если он уже там (Tab), клавиша и так дойдёт до его
+      // собственного onKeyDown ниже через обычный bubble — обработка здесь
+      // же удвоила бы шаг. Первое же такое нажатие переводит фокус на
+      // список по-настоящему (gridRef.focus(), тот же переход, что и у
+      // Tab), поэтому дальше Home/End/Enter достаются его НЕИЗМЕНЁННОМУ
+      // обработчику. Enter сюда намеренно не входит: в этом окне (в отличие
+      // от оверлея) голый <CR> в NORMAL-режиме уже занят глобальным
+      // vim-экшеном slaivePaste (см. Overlay.tsx — Vim это синглтон
+      // процесса, а не per-компонент, и main.tsx статически импортирует
+      // Overlay.tsx, так что регистрация действует и здесь) — но сама цель
+      // (vimActionTargets.onPaste) в этом окне никогда не перепривязывается,
+      // поэтому голый Enter в NORMAL здесь и без нас уже no-op, а не
+      // "j^"-переход на следующую строку. Раз реального поведения тут нет,
+      // отбирать нечего, но и учить Enter новому смыслу без явного фокуса —
+      // лишний риск, а не необходимость: то, что достаётся списку по Tab,
+      // работает без изменений, а один лишний Arrow/Home/End перед Enter не
+      // ломает сценарий из брифа ("стрелки листают, Enter подтверждает").
+      if (
+        level.length > 0 &&
+        document.activeElement !== gridRef.current &&
+        arrowsAvailable()
+      ) {
+        let moved = true
+        switch (e.key) {
+          case 'ArrowDown':
+            setSelectedIndex((i) => moveSelectionDown(i, level.length))
+            break
+          case 'ArrowUp':
+            setSelectedIndex((i) => moveSelectionUp(i, level.length))
+            break
+          case 'Home':
+            setSelectedIndex(0)
+            break
+          case 'End':
+            setSelectedIndex(level.length - 1)
+            break
+          default:
+            moved = false
+        }
+        if (moved) {
+          e.preventDefault()
+          gridRef.current?.focus()
+          return
+        }
+      }
+
       const node = nodeForKey(e, level, atRoot, actionShortcuts)
       if (!node) return
       e.preventDefault()
@@ -998,7 +1062,7 @@ export function MainWindow() {
             она вне .mw-panel-stack и не участвует в боковых переходах —
             анимации уровней её не видят, а она не путается в их учёте
             уходящих панелей. */}
-        {showHistory && <HistoryView onPick={onPickHistory} />}
+        {showHistory && <HistoryView onPick={onPickHistory} arrowsAvailable={arrowsAvailable} />}
 
         {/* .mw-panel-stack накладывает уходящую и текущую панели в одну
             grid-ячейку (см. styles.css) — обе видимы одновременно ровно то
