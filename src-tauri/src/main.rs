@@ -225,6 +225,16 @@ fn main() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("не удалось запустить Slaive");
+        .build(tauri::generate_context!())
+        .expect("не удалось запустить Slaive")
+        .run(|_app_handle, event| {
+            // Перехват запроса на выход — и от пункта Quit в трее
+            // (`app.exit(0)`), и от внешнего запроса на завершение
+            // (например, "quit" Apple Event) приходят сюда одним и тем же
+            // событием (см. macos::terminate_immediately).
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                api.prevent_exit();
+                macos::terminate_immediately();
+            }
+        });
 }
