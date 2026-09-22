@@ -48,7 +48,15 @@ tauri-plugin-log = "2"
 log = "0.4"
 
 [profile.release]
-strip = true
+# Полный strip убирал таблицу символов целиком: крэш-репорты macOS
+# (~/Library/Logs/DiagnosticReports) показывали голые адреса вида
+# `slaive: 0x7c43cc` вместо имён функций — диагностировать по ним нечего.
+# "debuginfo" снимает DWARF (номера строк, инлайны — самая тяжёлая часть),
+# но оставляет таблицу символов (nlist), которой достаточно для имени
+# функции и модуля во frame крэш-репорта; это то, что даёт adrs → «человек
+# понял, где искать», а не строку в файле. Дальше уже не жать: "none"
+# заметно раздувает бинарник ради данных, не нужных без dSYM под рукой.
+strip = "debuginfo"
 # lto выключен намеренно. При lto = true релиз не линкуется:
 #   Undefined symbols for architecture arm64:
 #     "___isPlatformVersionAtLeast", referenced from:
