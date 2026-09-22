@@ -41,6 +41,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 # "keychain" (классический SecKeychain, видимый в Keychain Access.app).
 # Проверено `cargo tree`.
 keyring = "4.2.0"
+# Файловый лог диагностики (см. src-tauri/src/main.rs) — пишет в
+# app_log_dir() (~/Library/Logs/net.slaive.app на macOS). `log` — сами
+# макросы (warn!/error!/info!), tauri-plugin-log — их бэкенд с ротацией.
+tauri-plugin-log = "2"
+log = "0.4"
 
 [profile.release]
 strip = true

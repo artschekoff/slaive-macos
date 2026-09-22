@@ -130,19 +130,24 @@ async fn complete_openai(cfg: &ResolvedProvider, req: AiRequest) -> Result<Strin
 
     let status = response.status();
     if !status.is_success() {
-        // Сырой текст — в eprintln!, а не в сообщение пользователю: он
-        // английский, длинный и часто содержит идентификаторы запроса
-        // провайдера (см. бриф). Пользователю — сообщение по коду ответа.
+        // Тело ответа — НЕ в лог: `req.user` в запросе часто содержит
+        // расшифровку или текст словаря пользователя (см. `run_ai_action`),
+        // а провайдеры иногда цитируют часть запроса прямо в теле ошибки
+        // (invalid_request_error, content policy и т.п.) — тело для
+        // пользователя тоже недостаточно надёжно, отсюда отдельное
+        // сообщение по коду ниже. В лог — код и длина тела, этого хватает
+        // отличить 401 от 429 от 500.
         let raw = response.text().await.unwrap_or_default();
-        eprintln!(
-            "OpenAI ответил кодом {}: {raw}",
-            status.as_u16()
+        log::warn!(
+            "OpenAI ответил кодом {}, тело {} байт",
+            status.as_u16(),
+            raw.len()
         );
         return Err(anyhow!(status_error_message(status.as_u16(), info.label)));
     }
 
     let raw = response.text().await.map_err(|e| {
-        eprintln!("не удалось прочитать тело ответа OpenAI: {e}");
+        log::warn!("не удалось прочитать тело ответа OpenAI: {e}");
         anyhow!("Unexpected response from {}. Try again.", info.label)
     })?;
     parse_chat_response(&raw)
@@ -201,7 +206,7 @@ struct ChatChoiceMessage {
 /// пользователю как результат, поэтому оба — явная ошибка, а не пустая строка.
 fn parse_chat_response(raw: &str) -> Result<String> {
     let parsed: ChatCompletionResponse = serde_json::from_str(raw).map_err(|e| {
-        eprintln!("не удалось разобрать ответ провайдера: {e}");
+        log::warn!("не удалось разобрать ответ провайдера: {e}");
         anyhow!("Unexpected response from the provider. Try again.")
     })?;
     let content = parsed

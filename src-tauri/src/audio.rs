@@ -188,7 +188,7 @@ fn input_device_names(host: &cpal::Host) -> Vec<String> {
         // Хост может отказать в перечислении (нет прав, нет аудиоподсистемы) —
         // это пустой список, а не паника.
         Err(e) => {
-            eprintln!("не удалось перечислить устройства ввода: {e}");
+            log::warn!("не удалось перечислить устройства ввода: {e}");
             Vec::new()
         }
     }
@@ -285,7 +285,7 @@ impl Recorder {
                                 p.push(peak);
                             }
                         },
-                        |err| eprintln!("ошибка потока микрофона: {err}"),
+                        |err| log::error!("ошибка потока микрофона: {err}"),
                         None,
                     )
                     .context("couldn't open the microphone stream")?;

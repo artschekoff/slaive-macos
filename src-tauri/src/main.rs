@@ -19,6 +19,26 @@ use tauri::{
 
 fn main() {
     tauri::Builder::default()
+        // Первым — иначе eprintln!/панику на самом раннем старте (до
+        // регистрации хоткея) некуда поймать. Пишет в app_log_dir()
+        // (~/Library/Logs/net.slaive.app на macOS) и дублирует в stdout —
+        // второе видно только при запуске из терминала (`npm run tauri
+        // dev`), но не мешает и в собранном .app. Ротация: KeepOne — при
+        // превышении max_file_size текущий файл становится `.old`, новый
+        // начинается с нуля; на диске никогда не больше двух файлов лога.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir { file_name: None },
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .max_file_size(5_000_000) // 5 МБ на файл, до 10 МБ суммарно с .old
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
@@ -84,7 +104,7 @@ fn main() {
                 .hotkey
                 .clone();
             if let Err(e) = commands::register_hotkey(app.handle(), &hotkey) {
-                eprintln!("хоткей не зарегистрирован: {e}");
+                log::error!("хоткей не зарегистрирован: {e}");
                 // register_hotkey сам выставляет hotkey_ok только в true (при
                 // успехе смены хоткея прежний рабочий не должен помечаться
                 // как сломанный из-за неудачной попытки). Только здесь, на
@@ -104,7 +124,7 @@ fn main() {
             if let Err(e) = commands::register_capture_hotkey(app.handle(), &capture_hotkey) {
                 // Не роняем запуск: без хоткея захвата приложение остаётся
                 // полностью рабочим, в отличие от хоткея записи.
-                eprintln!("хоткей захвата не зарегистрирован: {e}");
+                log::warn!("хоткей захвата не зарегистрирован: {e}");
             }
 
             // Без модели приложение бесполезно — сразу показываем настройки.

@@ -188,7 +188,7 @@ fn spawn_level_emitter(app: AppHandle, stop: Arc<AtomicBool>) {
         let appending = state.appending.lock().map(|a| *a).unwrap_or(false);
         let accumulated = accumulated_samples(&state, appending);
         if audio::session_limit_reached(accumulated, elapsed_secs) {
-            eprintln!(
+            log::warn!(
                 "потолок сессии: накоплено {accumulated} сэмплов, текущая запись {elapsed_secs:.1} с — останавливаем"
             );
             let _ = app.emit_to("overlay", "rec:limit", SESSION_LIMIT_STOPPED);
@@ -312,12 +312,12 @@ fn ai_read_key(provider: &str) -> Option<String> {
             Err(keyring::Error::NoEntry) => None,
             Err(e) => {
                 // Само значение ключа никогда не логируется — только факт сбоя.
-                eprintln!("не удалось прочитать ключ из Keychain: {e}");
+                log::warn!("не удалось прочитать ключ из Keychain: {e}");
                 None
             }
         },
         Err(e) => {
-            eprintln!("keychain недоступен: {e}");
+            log::warn!("keychain недоступен: {e}");
             None
         }
     }
@@ -576,7 +576,7 @@ pub fn hide_overlay(app: AppHandle) {
         std::thread::spawn(move || {
             if let Err(e) = macos::activate_pid(pid) {
                 // Приложение могли закрыть, пока панель была открыта — ожидаемо.
-                eprintln!("не удалось вернуть фокус при закрытии панели: {e}");
+                log::warn!("не удалось вернуть фокус при закрытии панели: {e}");
             }
         });
     }
@@ -825,7 +825,7 @@ pub fn begin_recording(app: &AppHandle) {
         // это не временное состояние. Молчаливый выход оставлял бы хоткей
         // мёртвым до перезапуска без единого объяснения.
         Err(std::sync::TryLockError::Poisoned(_)) => {
-            eprintln!("мьютекс транскрибера отравлен — предыдущая расшифровка запаниковала");
+            log::error!("мьютекс транскрибера отравлен — предыдущая расшифровка запаниковала");
             return emit_error(
                 app,
                 "The previous transcription crashed. Restart Slaive to keep recording.",
@@ -841,7 +841,7 @@ pub fn begin_recording(app: &AppHandle) {
     // «ещё расшифровываю» — про эту секунду, а потолок — про сессию целиком,
     // и сказать про потолок вместо них значило бы назвать не ту причину.
     if audio::session_limit_reached(accumulated_samples(&state, append), 0.0) {
-        eprintln!("потолок сессии: дозапись отклонена, накоплено максимум");
+        log::warn!("потолок сессии: дозапись отклонена, накоплено максимум");
         let _ = app.emit_to("overlay", "rec:limit", SESSION_LIMIT_FULL);
         return;
     }
@@ -903,7 +903,7 @@ pub fn begin_recording(app: &AppHandle) {
             // из двух текстов в зависимости от причины (I8): отсутствие
             // устройства не лечится выдачей разрешения, которое, возможно,
             // уже есть.
-            eprintln!("микрофон недоступен: {e}");
+            log::warn!("микрофон недоступен: {e}");
             let text = if e.to_string().contains("no input device found") {
                 "No microphone found. Connect one and try again."
             } else {
@@ -963,7 +963,7 @@ pub fn end_recording(app: &AppHandle) {
             Ok(pcm) => pcm,
             Err(e) => {
                 // cpal отдаёт причину по-английски — в лог, пользователю фиксированный текст.
-                eprintln!("запись не удалась: {e}");
+                log::error!("запись не удалась: {e}");
                 emit_error(&app, "Recording failed. Try again.");
                 // Панель уже показана (show_overlay отработал в hotkey_pressed
                 // ДО того, как эта запись вообще начала останавливаться) — тут
@@ -1016,7 +1016,7 @@ pub fn end_recording(app: &AppHandle) {
         let boosted_peak = audio::peak_amplitude(&boosted);
         // Оба пика в лог — так видно, работает ли настройка. Оба числа,
         // содержимое речи по-прежнему не логируется.
-        eprintln!(
+        log::info!(
             "записано сэмплов: {}, пик до усиления: {peak:.4}, усиление: {mic_gain:.2}x, пик после: {boosted_peak:.4}, дозапись: {append}",
             pcm.len()
         );
@@ -1078,7 +1078,7 @@ pub fn end_recording(app: &AppHandle) {
                     // — её добавляет .context(...) в whisper.rs. В лог уводим
                     // полную цепочку: причина внутри неё (whisper.cpp,
                     // файловая система) пользователю не нужна.
-                    eprintln!("модель whisper не загрузилась: {e:?}");
+                    log::error!("модель whisper не загрузилась: {e:?}");
                     emit_error(&app, e.to_string());
                     return focus_overlay(&app);
                 }
@@ -1129,7 +1129,7 @@ pub fn end_recording(app: &AppHandle) {
                 // Тот же приём: верхнее сообщение из .context(...) уже
                 // по-английски и полезно пользователю («recording too
                 // short…»), а полную цепочку — в лог, без содержимого записи.
-                eprintln!("расшифровка не удалась: {e:?}");
+                log::error!("расшифровка не удалась: {e:?}");
                 emit_error(&app, e.to_string());
                 focus_overlay(&app);
             }
@@ -1501,7 +1501,7 @@ fn try_capture_selection(app: &AppHandle, state: &AppState) -> Result<(), Captur
     let outcome = outcome.map_err(|e| CaptureFailure::Failed(e.to_string()))?;
 
     // Содержимое не логируем — это текст пользователя. Длина безопасна.
-    eprintln!(
+    log::info!(
         "захвачено символов: {}, буфер обмена восстановлен: {}",
         outcome.text.chars().count(),
         outcome.restored_clipboard
@@ -1565,7 +1565,7 @@ pub fn register_capture_hotkey(app: &AppHandle, hotkey: &str) -> anyhow::Result<
                         let _ = app.emit_to("overlay", "capture:error", message.clone());
                     }
                 }
-                eprintln!("захват не удался: {}", failure.message());
+                log::warn!("захват не удался: {}", failure.message());
             });
         })?;
 
@@ -1645,7 +1645,7 @@ pub fn paste_text(app: AppHandle, text: String) -> Result<(), String> {
             if let Err(e) = macos::activate_pid(pid) {
                 // Приложение могли закрыть между запоминанием PID и вставкой —
                 // это ожидаемо, вставляем в то, что активно сейчас.
-                eprintln!("не удалось вернуть фокус: {e}");
+                log::warn!("не удалось вернуть фокус: {e}");
             }
             // Даём macOS домигать переключением фокуса.
             // ponytail: фиксированная пауза — угадывание, что приложение уже
@@ -1670,7 +1670,7 @@ pub fn paste_text(app: AppHandle, text: String) -> Result<(), String> {
             // `activate_pid` (возврат фокуса) выше по-прежнему идёт через
             // osascript и может вернуть Automation-код (-1743) или один из
             // Accessibility-кодов — но его ошибка сейчас только логируется
-            // (см. `eprintln!` выше) и в `msg` не попадает, так что при
+            // (см. `log::warn!` выше) и в `msg` не попадает, так что при
             // реальном использовании эта ветка `Some(pane)` не срабатывает;
             // проверка остаётся как защита на случай, если сообщение
             // `send_paste` когда-нибудь снова станет проходить через текст
@@ -1686,7 +1686,7 @@ pub fn paste_text(app: AppHandle, text: String) -> Result<(), String> {
             } else {
                 // Технические детали — только в лог: в них нет распознанной речи,
                 // но и пользователю они ничего не объясняют.
-                eprintln!("вставка не удалась: {msg}");
+                log::warn!("вставка не удалась: {msg}");
                 show_overlay(&app);
                 // I5: буфер обмена уже получил текст первой строкой этой
                 // команды — при отказе автоматической вставки говорим об
@@ -1881,7 +1881,7 @@ pub fn list_history(app: AppHandle) -> Result<Vec<history::Entry>, String> {
     let mut entries = history::load(&dir).map_err(|e| e.to_string())?;
     // Только числа: сколько записей и сколько весит файл. Содержимое
     // расшифровок не логируется ни здесь, ни где-либо ещё.
-    eprintln!(
+    log::info!(
         "история: записей {}, файл {} байт",
         entries.len(),
         history::file_bytes(&dir)
@@ -1910,7 +1910,7 @@ pub fn add_history_entry(app: AppHandle, text: String, duration_secs: f32) -> Re
     let dir = data_dir(&app).map_err(|e| e.to_string())?;
     let entry = history::append(&dir, &text, duration_secs).map_err(|e| e.to_string())?;
     // id и длительность — числа, их можно; текста в логе нет.
-    eprintln!(
+    log::info!(
         "история: добавлена запись {}, длительность {:.1} с, файл {} байт",
         entry.id,
         entry.duration_secs,
@@ -1945,13 +1945,13 @@ pub fn update_history_entry(
     let dir = data_dir(&app).map_err(|e| e.to_string())?;
     let updated = history::update(&dir, id, &text, duration_secs).map_err(|e| e.to_string())?;
     if updated {
-        eprintln!(
+        log::info!(
             "история: обновлена запись {id}, длительность {duration_secs:.1} с, файл {} байт",
             history::file_bytes(&dir)
         );
         return Ok(id);
     }
-    eprintln!("история: записи {id} уже нет — заводим новую");
+    log::info!("история: записи {id} уже нет — заводим новую");
     add_history_entry(app, text, duration_secs)
 }
 
@@ -1959,7 +1959,7 @@ pub fn update_history_entry(
 pub fn delete_history_entry(app: AppHandle, id: u64) -> Result<(), String> {
     let dir = data_dir(&app).map_err(|e| e.to_string())?;
     history::delete(&dir, id).map_err(|e| e.to_string())?;
-    eprintln!("история: удалена запись {id}");
+    log::info!("история: удалена запись {id}");
     Ok(())
 }
 
@@ -1970,7 +1970,7 @@ pub fn delete_history_entry(app: AppHandle, id: u64) -> Result<(), String> {
 pub fn clear_history(app: AppHandle) -> Result<(), String> {
     let dir = data_dir(&app).map_err(|e| e.to_string())?;
     history::clear(&dir).map_err(|e| e.to_string())?;
-    eprintln!("история: очищена");
+    log::info!("история: очищена");
     Ok(())
 }
 

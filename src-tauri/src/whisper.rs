@@ -178,12 +178,12 @@ impl Transcriber {
             // считает та же модель, которая сейчас будет расшифровывать.
             // В лог идут только числа — сам словарь это тоже личные данные.
             match self.count_tokens(prompt) {
-                Ok(n) if n > MAX_PROMPT_TOKENS => eprintln!(
+                Ok(n) if n > MAX_PROMPT_TOKENS => log::warn!(
                     "словарь: {n} токенов при потолке {MAX_PROMPT_TOKENS} — whisper отбросит {} с начала списка",
                     n - MAX_PROMPT_TOKENS
                 ),
                 Ok(_) => {}
-                Err(e) => eprintln!("словарь: посчитать токены не удалось: {e}"),
+                Err(e) => log::warn!("словарь: посчитать токены не удалось: {e}"),
             }
             params.set_initial_prompt(prompt);
         }
