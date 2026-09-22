@@ -1880,3 +1880,13 @@ button.primary {
      см. тот же z-index у .overlay-close выше. */
   z-index: 2;
 }
+
+/* Версия в подвале настроек — приглушённая и прижата к правому краю:
+   это справочная подпись, а не элемент управления, и соперничать за
+   внимание с кнопкой Save ей незачем. */
+.settings-foot .settings-version {
+  margin-left: auto;
+  color: #8e8e93;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}

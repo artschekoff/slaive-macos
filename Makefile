@@ -17,6 +17,10 @@ dev:
 	npm run tauri dev
 
 build:
+	@# Смонтированный том с тем же именем ломает bundle_dmg.sh: он не может
+	@# создать образ, пока /Volumes/Slaive занят предыдущим. Свежесобранный
+	@# образ обычно как раз открыт для проверки, поэтому отцепляем молча.
+	-@hdiutil detach /Volumes/Slaive -quiet 2>/dev/null || true
 	npm run tauri build
 
 test:

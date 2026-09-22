@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
+import { getVersion } from '@tauri-apps/api/app'
 import { ShortcutCapture } from './ShortcutCapture'
 import { DictionaryField } from './DictionaryField'
 import {
@@ -84,6 +85,15 @@ export function Settings() {
   // settings-sections.ts): переключение мгновенное, без анимаций — это
   // настройки, а не мастер.
   const [section, setSection] = useState<SectionId>(FIRST_SECTION)
+
+  // Версия берётся из собранного приложения, а не вписывается строкой:
+  // вписанная разошлась бы с настоящей при первом же выпуске, и подпись
+  // в интерфейсе врала бы ровно тогда, когда по ней хотят понять, что
+  // именно установлено.
+  const [version, setVersion] = useState('')
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => setVersion(''))
+  }, [])
 
   // Проверка на столкновение комбинаций. Раньше конфликт проваливался молча:
   // назначил действию комбинацию глобального хоткея — и действие переставало
@@ -1043,6 +1053,7 @@ export function Settings() {
           </button>
           {saved && <span className="ok">Saved</span>}
           {saveError && <span className="err">{saveError}</span>}
+          {version && <span className="settings-version">Slaive {version}</span>}
         </footer>
       </div>
     </div>

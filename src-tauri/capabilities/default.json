@@ -9,6 +9,7 @@
     "core:window:allow-show",
     "core:window:allow-set-visible-on-all-workspaces",
     "core:window:allow-set-size",
-    "core:event:default"
+    "core:event:default",
+    "core:app:allow-version"
   ]
 }
