@@ -846,9 +846,13 @@ pub fn begin_recording(app: &AppHandle) {
         return;
     }
     // Устройство выбирается один раз, на старте записи. Менять его посреди
-    // записи нельзя — выбор применяется к следующей (см. бриф).
-    let preferred = state.settings.lock().unwrap().input_device.clone();
-    match Recorder::start(preferred) {
+    // записи нельзя — выбор применяется к следующей (см. бриф). Флаг
+    // эхоподавления читается там же и так же применяется к следующей записи.
+    let (preferred, echo_cancel) = {
+        let s = state.settings.lock().unwrap();
+        (s.input_device.clone(), s.echo_cancellation)
+    };
+    match Recorder::start(preferred, echo_cancel) {
         Ok(rec) => {
             // Сохранённого устройства не нашлось — пишем с умолчания, но
             // молчать об этом нельзя: человек будет думать, что диктует в
@@ -992,7 +996,7 @@ pub fn end_recording(app: &AppHandle) {
         // рядом с ползунком — иначе выбор значения это гадание вслепую.
         let _ = app.emit_to("settings", "rec:peak", peak);
 
-        let (model_path, language, vad_model_path, mic_gain, vad_threshold, dictionary) = {
+        let (model_path, language, vad_model_path, mic_gain, vad_threshold, dictionary, high_pass) = {
             let s = state.settings.lock().unwrap();
             (
                 s.model_path.clone(),
@@ -1001,18 +1005,27 @@ pub fn end_recording(app: &AppHandle) {
                 s.mic_gain,
                 s.vad_threshold,
                 s.dictionary.clone(),
+                s.high_pass_filter,
             )
         };
         // Затравка собирается ровно здесь и не логируется: словарь — тоже
         // личные данные пользователя, как и сама расшифровка.
         let initial_prompt = crate::whisper::initial_prompt(&dictionary);
 
-        // Усиление применяется здесь и только здесь — к копии PCM, которая
-        // уходит в VAD и whisper (`transcribe` получает уже усиленное). Ни
-        // дорожка уровня, ни `Play` его не видят: дорожка рисуется из пиков,
-        // посчитанных в колбэке микрофона внутри `audio::Recorder`, а в
-        // `last_recording` ниже кладётся сырая запись.
-        let boosted = audio::apply_gain(&pcm, mic_gain);
+        // Фильтр и усиление применяются здесь и только здесь — к копии PCM,
+        // которая уходит в VAD и whisper (`transcribe` получает уже
+        // обработанное). Ни дорожка уровня, ни `Play` их не видят: дорожка
+        // рисуется из пиков, посчитанных в колбэке микрофона внутри
+        // `audio::Recorder`, а в `last_recording` ниже кладётся сырая запись.
+        // Порядок: сперва срез гула, потом усиление — иначе усиление тратило
+        // бы запас громкости (и потолок клиппинга) на гул, который всё равно
+        // будет отрезан.
+        let filtered = if high_pass {
+            audio::high_pass(&pcm, audio::WHISPER_SAMPLE_RATE, audio::HIGH_PASS_CUTOFF_HZ)
+        } else {
+            pcm.clone()
+        };
+        let boosted = audio::apply_gain(&filtered, mic_gain);
         let boosted_peak = audio::peak_amplitude(&boosted);
         // Оба пика в лог — так видно, работает ли настройка. Оба числа,
         // содержимое речи по-прежнему не логируется.
@@ -1415,12 +1428,12 @@ impl CaptureOps for RealCaptureOps<'_> {
 /// Два правила, и оба видны здесь целиком, а не разбросаны по телу команды.
 ///
 /// Первое: неудачная попытка цель не трогает. Захват читает `frontmost_pid()`
-/// первым делом — иначе главное окно успеет забрать фокус, — но нажатие без
-/// выделения, отказ буфера обмена или отказ в праве ничем не отличаются для
-/// пользователя от «ничего не произошло». Надиктовать в одном приложении,
-/// перейти в другое, нажать там хоткей впустую — и Paste, отправляющий
-/// расшифровку из первого приложения во второе, ровно тот случай, который
-/// `captured` и закрывает.
+/// первым делом — иначе главное окно успеет забрать фокус, — но отказ буфера
+/// обмена или отказ в праве ничем не отличаются для пользователя от «ничего
+/// не произошло». Нажатие БЕЗ выделения при этом попытка удачная: окно
+/// открывается пустым (режим генерации), и целью вставки обязано стать
+/// приложение, где остался курсор, — поэтому `captured` здесь означает
+/// «окно открылось из этого приложения», а не «текст добыт».
 ///
 /// Второе: даже при удаче целью не может стать сам Slaive — это тот же
 /// инвариант, что у записи, и считает его та же `next_source_pid`. Захват —
@@ -1499,6 +1512,14 @@ fn try_capture_selection(app: &AppHandle, state: &AppState) -> Result<(), Captur
     }
 
     let outcome = outcome.map_err(|e| CaptureFailure::Failed(e.to_string()))?;
+
+    // Пустое выделение — не ошибка, а второй режим захвата: окно открывается
+    // пустым, пользователь надиктовывает запрос (Generate/Ask AI), а Paste
+    // вставит результат туда, где остался курсор.
+    let Some(outcome) = outcome else {
+        log::info!("выделения нет — главное окно открывается пустым");
+        return follow_to_main_window(app.clone(), String::new()).map_err(CaptureFailure::Failed);
+    };
 
     // Содержимое не логируем — это текст пользователя. Длина безопасна.
     log::info!(
@@ -1601,6 +1622,13 @@ pub fn paste_text(app: AppHandle, text: String) -> Result<(), String> {
         return Err("Slaive is still working with the clipboard. Try again in a moment.".to_string());
     };
 
+    // Что лежало в буфере ДО нас — вернём после успешной вставки: вставка
+    // не должна съедать то, что пользователь копировал до неё.
+    // ponytail: как и в захвате — только текст. Картинку или файл вернуть
+    // этим API нечем; усложнить через NSPasteboard со всеми типами, если
+    // начнёт мешать.
+    let previous = app.clipboard().read_text().ok();
+
     app.clipboard()
         .write_text(text)
         .map_err(|e| e.to_string())?;
@@ -1657,46 +1685,67 @@ pub fn paste_text(app: AppHandle, text: String) -> Result<(), String> {
             // фиксированной длины.
             std::thread::sleep(std::time::Duration::from_millis(120));
         }
-        if let Err(e) = macos::send_paste() {
-            let msg = e.to_string();
-            // `send_paste` больше не ходит через osascript/System Events —
-            // теперь это CGEventPost, а он в принципе не умеет сообщать об
-            // отказе в праве: без Accessibility событие просто молча
-            // отбрасывается системой, `send_paste` в этом случае возвращает
-            // `Ok(())`. Настоящий отказ в праве уже отловлен ВЫШЕ,
-            // `has_accessibility_permission()`, — сюда, в `Err`, теперь
-            // попадают только сбои создания CGEventSource/CGEvent, у которых
-            // нет отношения к правам. `permission_pane` здесь оставлен не зря:
-            // `activate_pid` (возврат фокуса) выше по-прежнему идёт через
-            // osascript и может вернуть Automation-код (-1743) или один из
-            // Accessibility-кодов — но его ошибка сейчас только логируется
-            // (см. `log::warn!` выше) и в `msg` не попадает, так что при
-            // реальном использовании эта ветка `Some(pane)` не срабатывает;
-            // проверка остаётся как защита на случай, если сообщение
-            // `send_paste` когда-нибудь снова станет проходить через текст
-            // ошибки внешнего процесса.
-            if let Some(pane) = macos::permission_pane(&msg) {
-                show_overlay(&app);
-                let text = match pane {
-                    macos::PrivacyPane::Automation => AUTOMATION_PERMISSION_MESSAGE,
-                    macos::PrivacyPane::Accessibility => ACCESSIBILITY_PERMISSION_MESSAGE,
-                };
-                emit_accessibility_error(&app, text, pane);
-                focus_overlay(&app);
-            } else {
-                // Технические детали — только в лог: в них нет распознанной речи,
-                // но и пользователю они ничего не объясняют.
-                log::warn!("вставка не удалась: {msg}");
-                show_overlay(&app);
-                // I5: буфер обмена уже получил текст первой строкой этой
-                // команды — при отказе автоматической вставки говорим об
-                // этом прямо, а не оставляем тупик.
-                emit_error(
-                    &app,
-                    "Couldn't paste automatically. The text is already on your clipboard — \
-                     press Cmd+V to paste it manually.",
-                );
-                focus_overlay(&app);
+        match macos::send_paste() {
+            Ok(()) => {
+                // Возвращаем прежний буфер ПОСЛЕ того, как цель успела
+                // обработать Cmd+V: нажатие доставляется асинхронно, и
+                // приложение читает буфер в момент обработки клавиши.
+                // ponytail: фиксированные 300 мс — угадывание, как и пауза
+                // фокуса выше; если на медленных приложениях начнёт
+                // вставляться СТАРЫЙ текст, увеличить или перейти на опрос
+                // pasteboard_change_count цели. Нечего возвращать (в буфере
+                // было пусто или не текст) — оставляем вставленное.
+                if let Some(prev) = previous {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    if let Err(e) = app.clipboard().write_text(prev) {
+                        log::warn!("не удалось вернуть прежний буфер обмена: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                // Буфер при сбое НЕ восстанавливаем: подсказки ниже обещают
+                // «текст уже в буфере, нажми Cmd+V» — и он там и должен быть.
+                //
+                // `send_paste` больше не ходит через osascript/System Events —
+                // теперь это CGEventPost, а он в принципе не умеет сообщать об
+                // отказе в праве: без Accessibility событие просто молча
+                // отбрасывается системой, `send_paste` в этом случае возвращает
+                // `Ok(())`. Настоящий отказ в праве уже отловлен ВЫШЕ,
+                // `has_accessibility_permission()`, — сюда, в `Err`, теперь
+                // попадают только сбои создания CGEventSource/CGEvent, у которых
+                // нет отношения к правам. `permission_pane` здесь оставлен не зря:
+                // `activate_pid` (возврат фокуса) выше по-прежнему идёт через
+                // osascript и может вернуть Automation-код (-1743) или один из
+                // Accessibility-кодов — но его ошибка сейчас только логируется
+                // (см. `log::warn!` выше) и в `msg` не попадает, так что при
+                // реальном использовании эта ветка `Some(pane)` не срабатывает;
+                // проверка остаётся как защита на случай, если сообщение
+                // `send_paste` когда-нибудь снова станет проходить через текст
+                // ошибки внешнего процесса.
+                if let Some(pane) = macos::permission_pane(&msg) {
+                    show_overlay(&app);
+                    let text = match pane {
+                        macos::PrivacyPane::Automation => AUTOMATION_PERMISSION_MESSAGE,
+                        macos::PrivacyPane::Accessibility => ACCESSIBILITY_PERMISSION_MESSAGE,
+                    };
+                    emit_accessibility_error(&app, text, pane);
+                    focus_overlay(&app);
+                } else {
+                    // Технические детали — только в лог: в них нет распознанной
+                    // речи, но и пользователю они ничего не объясняют.
+                    log::warn!("вставка не удалась: {msg}");
+                    show_overlay(&app);
+                    // I5: буфер обмена уже получил текст первой строкой этой
+                    // команды — при отказе автоматической вставки говорим об
+                    // этом прямо, а не оставляем тупик.
+                    emit_error(
+                        &app,
+                        "Couldn't paste automatically. The text is already on your clipboard — \
+                         press Cmd+V to paste it manually.",
+                    );
+                    focus_overlay(&app);
+                }
             }
         }
     });
@@ -2056,10 +2105,11 @@ mod tests {
         assert_eq!(next_source_pid(Some(42), None, 777), None);
     }
 
-    /// Нажатие хоткея захвата впустую не должно переназначать цель вставки.
-    /// Сценарий: надиктовали в VS Code, перешли в Chrome, нажали хоткей
-    /// ничего не выделив. Захват не удался — значит и вставлять по-прежнему
-    /// некуда, кроме VS Code, откуда пришёл текст в панели.
+    /// Сорвавшийся захват (буфер занят, Cmd+C не ушёл) не должен
+    /// переназначать цель вставки: для пользователя ничего не произошло,
+    /// и вставлять по-прежнему некуда, кроме VS Code, откуда пришёл текст
+    /// в панели. Пустое выделение сюда НЕ относится — оно теперь открывает
+    /// пустое окно и цель переносит (см. `capture_source_pid`).
     #[test]
     fn a_failed_capture_leaves_the_paste_target_alone() {
         const VS_CODE: i32 = 42;

@@ -6,7 +6,6 @@
 //! сроках — то, что можно проверить без рабочего стола; сами примитивы
 //! (нажатие, счётчик, буфер) приходят снаружи через `CaptureOps`.
 
-use anyhow::anyhow;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -92,9 +91,10 @@ fn lock_flag(flag: &Mutex<bool>) -> MutexGuard<'_, bool> {
 
 /// Захватывает выделенный текст.
 ///
-/// Ошибка «No text selected» — не сбой, а нормальный исход: пользователь мог
-/// нажать хоткей, ничего не выделив.
-pub fn capture_selection<O: CaptureOps>(ops: &O) -> anyhow::Result<CaptureOutcome> {
+/// `Ok(None)` — не сбой, а нормальный исход: пользователь нажал хоткей,
+/// ничего не выделив. Вызывающая сторона на это открывает главное окно
+/// пустым — режим «надиктовать запрос и сгенерировать текст», а не ошибка.
+pub fn capture_selection<O: CaptureOps>(ops: &O) -> anyhow::Result<Option<CaptureOutcome>> {
     let previous = ops.read_text();
     let before = ops.change_count();
 
@@ -122,9 +122,7 @@ pub fn capture_selection<O: CaptureOps>(ops: &O) -> anyhow::Result<CaptureOutcom
         // Ничего не писали в буфер — возвращать нечего. Запись того же
         // значения обратно сдвинула бы счётчик для всех остальных
         // наблюдателей в системе на ровном месте.
-        return Err(anyhow!(
-            "No text selected. Select some text first, then press the capture hotkey."
-        ));
+        return Ok(None);
     }
 
     let captured = ops.read_text().unwrap_or_default();
@@ -145,17 +143,16 @@ pub fn capture_selection<O: CaptureOps>(ops: &O) -> anyhow::Result<CaptureOutcom
     };
 
     if text.is_empty() {
-        return Err(anyhow!(
-            "No text selected. Select some text first, then press the capture hotkey."
-        ));
+        return Ok(None);
     }
 
-    Ok(CaptureOutcome { text, restored_clipboard })
+    Ok(Some(CaptureOutcome { text, restored_clipboard }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
     use std::cell::RefCell;
     use std::time::Duration;
 
@@ -233,7 +230,7 @@ mod tests {
     #[test]
     fn returns_the_copied_text_when_the_counter_moves() {
         let ops = Fake::new(Some(1), Some("старое"), Some("выделенное"));
-        let out = capture_selection(&ops).unwrap();
+        let out = capture_selection(&ops).unwrap().expect("выделение было");
         assert_eq!(out.text, "выделенное");
     }
 
@@ -248,14 +245,12 @@ mod tests {
     }
 
     #[test]
-    fn errors_when_nothing_was_selected() {
-        // Счётчик не двигается — значит Cmd+C ничего не скопировал.
+    fn reports_nothing_selected_when_the_counter_never_moves() {
+        // Счётчик не двигается — значит Cmd+C ничего не скопировал. Это не
+        // ошибка, а исход `None`: вызывающая сторона открывает пустое окно.
         let ops = Fake::new(None, Some("старое"), None);
-        let err = capture_selection(&ops).unwrap_err().to_string();
-        assert!(
-            err.contains("No text selected"),
-            "сообщение должно объяснять, что выделения не было, получено: {err}"
-        );
+        let out = capture_selection(&ops).expect("пустое выделение — не сбой");
+        assert!(out.is_none(), "пустое выделение вернулось как захваченный текст");
     }
 
     #[test]
@@ -282,17 +277,21 @@ mod tests {
     fn survives_an_empty_clipboard_before_capture() {
         // Восстанавливать нечего — и это не ошибка.
         let ops = Fake::new(Some(1), None, Some("выделенное"));
-        let out = capture_selection(&ops).unwrap();
+        let out = capture_selection(&ops).unwrap().expect("выделение было");
         assert_eq!(out.text, "выделенное");
         assert!(!out.restored_clipboard);
     }
 
     #[test]
-    fn rejects_a_selection_of_only_whitespace() {
-        // Пробелы и переводы строк — не текст, с которым есть что делать.
+    fn treats_a_selection_of_only_whitespace_as_nothing() {
+        // Пробелы и переводы строк — не текст, с которым есть что делать:
+        // тот же исход `None`, что и при пустом выделении.
         let ops = Fake::new(Some(1), Some("старое"), Some("   \n\t  "));
-        let err = capture_selection(&ops).unwrap_err().to_string();
-        assert!(err.contains("No text selected"), "получено: {err}");
+        let out = capture_selection(&ops).expect("пробельное выделение — не сбой");
+        assert!(out.is_none(), "пробельное выделение сошло за текст");
+        // Буфер при этом уже был занят нашим копированием — прежнее
+        // содержимое обязано вернуться, как и при обычном захвате.
+        assert_eq!(ops.clipboard.borrow().as_deref(), Some("старое"));
     }
 
 
@@ -303,7 +302,9 @@ mod tests {
         // выделение, и буфер разом; вместо этого честно сообщаем, что
         // восстановить не вышло.
         let ops = Fake::new(Some(1), Some("старое"), Some("выделенное")).with_failing_writes();
-        let out = capture_selection(&ops).expect("захват не должен падать из-за сбоя записи");
+        let out = capture_selection(&ops)
+            .expect("захват не должен падать из-за сбоя записи")
+            .expect("выделение было");
         assert_eq!(out.text, "выделенное");
         assert!(
             !out.restored_clipboard,

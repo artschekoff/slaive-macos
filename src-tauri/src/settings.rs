@@ -94,8 +94,8 @@ pub struct Settings {
     /// Follow живёт в панели, Fix — в главном окне, и в фокусе всегда только
     /// одно из них.
     pub follow_shortcut: String,
-    /// Хоткеи действий главного окна (Translate / Ask AI / Fix / Shorten /
-    /// Summarize) — та же оговорка, что у `paste_shortcut`/`copy_shortcut`:
+    /// Хоткеи действий главного окна (Translate / Ask AI / Generate / Fix /
+    /// Shorten / Summarize) — та же оговорка, что у `paste_shortcut`/`copy_shortcut`:
     /// окно-локальные, перехватываются обычным keydown внутри окна `main`
     /// (см. MainWindow.tsx), а не через tauri-plugin-global-shortcut.
     /// Хранятся отдельными полями, а не картой «id действия → комбинация»:
@@ -105,6 +105,7 @@ pub struct Settings {
     /// ponytail: если действия станут пользовательскими, заменить на карту.
     pub translate_shortcut: String,
     pub ask_ai_shortcut: String,
+    pub generate_shortcut: String,
     pub fix_shortcut: String,
     pub shorten_shortcut: String,
     pub summarize_shortcut: String,
@@ -115,9 +116,15 @@ pub struct Settings {
     /// перехвачен vim-экшеном `slaivePaste` (см. Overlay.tsx). В главном окне
     /// такого экшена нет, и голый `Enter` там означал бы ровно то, что ему и
     /// положено означать в редакторе, — перенос строки. Поэтому у главного
-    /// окна своя комбинация, и она с модификатором, как и остальные четыре
-    /// его хоткея.
+    /// окна своя комбинация, и она с модификатором, как и остальные его
+    /// хоткеи.
     pub main_paste_shortcut: String,
+    /// Хоткей кнопки Copy главного окна — отдельное поле от `copy_shortcut`
+    /// панели по той же причине, что у пары Paste: комбинации настраиваются
+    /// на каждое окно свои, хотя действие одно. Дефолт совпадает с панельным
+    /// Cmd+C намеренно — одна мышечная память на оба окна; столкновением это
+    /// не считается, области разные (см. src/shortcut-conflicts.ts).
+    pub main_copy_shortcut: String,
     /// Хоткей кнопки Accept главного окна — «предложение ИИ становится
     /// текстом окончательно». Та же оговорка, что у остальных: окно-локальный.
     ///
@@ -171,6 +178,18 @@ pub struct Settings {
     /// (iPhone, USB-хабы); чинится переходом на CoreAudio device UID, если
     /// начнёт мешать.
     pub input_device: Option<String>,
+    /// Системное эхоподавление (Voice Processing I/O): звук, который Mac сам
+    /// проигрывает (видео, музыка), вычитается из сигнала микрофона — иначе
+    /// он попадает в диктовку. Побочно Apple добавляет своё шумоподавление и
+    /// автоусиление — тембр записи слегка меняется, поэтому настройка
+    /// выключаемая. Если VPIO не поднимается, запись автоматически идёт
+    /// обычным путём (см. `audio::Recorder::start`).
+    pub echo_cancellation: bool,
+    /// High-pass фильтр 80 Гц перед VAD и whisper (см. `audio::high_pass`):
+    /// срезает гул помещения и вентиляторов, в которых речи нет. К сырой
+    /// записи (Play, история) не применяется — это параметр распознавания,
+    /// как и `mic_gain`.
+    pub high_pass_filter: bool,
     /// Непрозрачность окон приложения, 0.5–1.0. Уходит в `NSWindow
     /// alphaValue` (см. `macos::set_window_alpha`), то есть красит окно
     /// целиком: содержимое, нативную полосу заголовка и тень. Одно значение
@@ -338,6 +357,9 @@ impl Default for Settings {
             translate_shortcut: "Super+KeyL".to_string(),
             // Cmd+K — сложившееся «спросить ИИ» в редакторах.
             ask_ai_shortcut: "Super+KeyK".to_string(),
+            // Cmd+G — мнемоника Generate; «найти следующее» из стандартного
+            // меню macOS в приложении отсутствует, сочетание свободно.
+            generate_shortcut: "Super+KeyG".to_string(),
             // Cmd+F — мнемоника Fix; поиска по тексту в приложении нет,
             // сочетание свободно.
             fix_shortcut: "Super+KeyF".to_string(),
@@ -353,6 +375,9 @@ impl Default for Settings {
             // комбинация не отбирает Enter ни у insert-режима (перенос
             // строки), ни у normal-режима.
             main_paste_shortcut: "Super+Enter".to_string(),
+            // Cmd+C — тот же, что у панели: копирование оно и есть
+            // копирование, в грамматике Vim Cmd не встречается.
+            main_copy_shortcut: "Super+KeyC".to_string(),
             // Shift+Cmd+Enter — тот же «подтвердить», что у Paste, но с
             // добавленным Shift. Два модификатора здесь не педантизм: Accept
             // затирает текст пользователя предложением модели, и вернуть
@@ -372,6 +397,12 @@ impl Default for Settings {
             // «System default» — следовать за системой. Это же и поведение,
             // которое было до появления выбора устройства.
             input_device: None,
+            // Включено по умолчанию: запись под играющее видео — обычный
+            // сценарий, а откат на cpal при сбое VPIO автоматический.
+            echo_cancellation: true,
+            // Включён из коробки: ниже 80 Гц речи нет, резать нечего, кроме
+            // гула; выключатель — на случай записи не-речи.
+            high_pass_filter: true,
             window_opacity: DEFAULT_WINDOW_OPACITY,
             dictionary: DEFAULT_DICTIONARY.to_string(),
         }
@@ -558,6 +589,7 @@ mod tests {
         assert_eq!(s.follow_shortcut, "Super+KeyF");
         assert_eq!(s.translate_shortcut, "Super+KeyL");
         assert_eq!(s.ask_ai_shortcut, "Super+KeyK");
+        assert_eq!(s.generate_shortcut, "Super+KeyG");
         assert_eq!(s.fix_shortcut, "Super+KeyF");
         assert_eq!(s.shorten_shortcut, "Super+KeyS");
         // Не Cmd+S (занят Shorten) и не Cmd+M (системный Minimize).
@@ -565,6 +597,8 @@ mod tests {
         // Cmd+Enter, а не голый Enter как у панели: в главном окне Enter
         // принадлежит редактору (см. комментарий у поля).
         assert_eq!(s.main_paste_shortcut, "Super+Enter");
+        // Cmd+C, как у панели: области разные, столкновения нет.
+        assert_eq!(s.main_copy_shortcut, "Super+KeyC");
         // Shift+Cmd+Enter — намеренно туже, чем Paste: Accept затирает текст
         // пользователя предложением модели.
         assert_eq!(s.accept_shortcut, "Shift+Super+Enter");
@@ -572,6 +606,10 @@ mod tests {
         assert_eq!(s.mic_gain, 1.0);
         assert_eq!(s.vad_threshold, 0.5);
         assert_eq!(s.input_device, None);
+        // Эхоподавление включено из коробки: запись под играющее видео —
+        // обычный сценарий, а при сбое VPIO откат на cpal автоматический.
+        assert!(s.echo_cancellation);
+        assert!(s.high_pass_filter);
         // Чуть прозрачно, но не настолько, чтобы это мешало: см. бриф.
         assert_eq!(s.window_opacity, 0.9);
         assert_eq!(s.dictionary, DEFAULT_DICTIONARY);
@@ -627,9 +665,11 @@ mod tests {
             ("copyShortcut", &s.copy_shortcut, "panel"),
             ("followShortcut", &s.follow_shortcut, "panel"),
             ("mainPasteShortcut", &s.main_paste_shortcut, "main"),
+            ("mainCopyShortcut", &s.main_copy_shortcut, "main"),
             ("acceptShortcut", &s.accept_shortcut, "main"),
             ("translateShortcut", &s.translate_shortcut, "main"),
             ("askAiShortcut", &s.ask_ai_shortcut, "main"),
+            ("generateShortcut", &s.generate_shortcut, "main"),
             ("fixShortcut", &s.fix_shortcut, "main"),
             ("shortenShortcut", &s.shorten_shortcut, "main"),
             ("summarizeShortcut", &s.summarize_shortcut, "main"),
@@ -677,10 +717,12 @@ mod tests {
             follow_shortcut: "Ctrl+Alt+KeyF".into(),
             translate_shortcut: "Ctrl+KeyL".into(),
             ask_ai_shortcut: "Ctrl+KeyK".into(),
+            generate_shortcut: "Ctrl+KeyG".into(),
             fix_shortcut: "Ctrl+KeyF".into(),
             shorten_shortcut: "Ctrl+KeyS".into(),
             summarize_shortcut: "Ctrl+KeyU".into(),
             main_paste_shortcut: "Ctrl+Enter".into(),
+            main_copy_shortcut: "Ctrl+Super+KeyC".into(),
             accept_shortcut: "Ctrl+Shift+Enter".into(),
             ai: AiSettings {
                 provider: "openai".into(),
@@ -690,6 +732,8 @@ mod tests {
             mic_gain: 3.5,
             vad_threshold: 0.35,
             input_device: Some("Пётр's iPhone Microphone".into()),
+            echo_cancellation: false,
+            high_pass_filter: false,
             window_opacity: 0.75,
             dictionary: "React\nTypeScript".into(),
         };
@@ -839,10 +883,12 @@ mod tests {
         let s = load(&dir);
         assert_eq!(s.translate_shortcut, "Super+KeyL");
         assert_eq!(s.ask_ai_shortcut, "Super+KeyK");
+        assert_eq!(s.generate_shortcut, "Super+KeyG");
         assert_eq!(s.fix_shortcut, "Super+KeyF");
         assert_eq!(s.shorten_shortcut, "Super+KeyS");
         assert_eq!(s.summarize_shortcut, "Super+KeyU");
         assert_eq!(s.accept_shortcut, "Shift+Super+Enter");
+        assert_eq!(s.main_copy_shortcut, "Super+KeyC");
         // Соседнее поле читается как раньше.
         assert_eq!(s.paste_shortcut, "Shift+Enter");
     }

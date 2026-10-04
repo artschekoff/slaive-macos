@@ -50,7 +50,7 @@ test('пустых разделов нет: в каждом есть что на
 test('распределение настроек по разделам — ровно как в брифе', () => {
   const byId = (id: string) => SECTIONS.find((s) => s.id === id)!.settings
   // Audio — что попадает в микрофон.
-  assert.deepEqual(byId('audio'), ['inputDevice', 'micGain'])
+  assert.deepEqual(byId('audio'), ['inputDevice', 'echoCancellation', 'highPassFilter', 'micGain'])
   // Models — что скачивается и занимает диск.
   assert.deepEqual(byId('models'), ['modelPath', 'vadModelPath'])
   // Recognition — как звук превращается в текст.
@@ -63,10 +63,12 @@ test('распределение настроек по разделам — ро
     'followShortcut',
     'translateShortcut',
     'askAiShortcut',
+    'generateShortcut',
     'fixShortcut',
     'shortenShortcut',
     'summarizeShortcut',
     'mainPasteShortcut',
+    'mainCopyShortcut',
     'acceptShortcut',
   ])
   // AI — обработка уже готового текста: провайдер и то, что у него просят.
@@ -111,16 +113,20 @@ test('каждая хранимая настройка доступна хотя
     followShortcut: 'Ctrl+KeyF',
     translateShortcut: 'Super+KeyL',
     askAiShortcut: 'Super+KeyK',
+    generateShortcut: 'Super+KeyG',
     fixShortcut: 'Super+KeyF',
     shortenShortcut: 'Super+KeyS',
     summarizeShortcut: 'Super+KeyU',
     mainPasteShortcut: 'Super+Enter',
+    mainCopyShortcut: 'Super+KeyC',
     acceptShortcut: 'Shift+Super+Enter',
     ai: { provider: 'openai', providers: {} },
     translateLanguages: 'English, Spanish, Russian',
     micGain: 1,
     vadThreshold: 0.5,
     inputDevice: null,
+    echoCancellation: true,
+    highPassFilter: true,
     windowOpacity: 0.9,
     dictionary: '',
   }

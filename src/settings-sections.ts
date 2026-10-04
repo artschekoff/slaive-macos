@@ -7,6 +7,8 @@
 export type SettingKey =
   | 'inputDevice'
   | 'micGain'
+  | 'echoCancellation'
+  | 'highPassFilter'
   | 'modelPath'
   | 'vadModelPath'
   | 'language'
@@ -18,10 +20,12 @@ export type SettingKey =
   | 'followShortcut'
   | 'translateShortcut'
   | 'askAiShortcut'
+  | 'generateShortcut'
   | 'fixShortcut'
   | 'shortenShortcut'
   | 'summarizeShortcut'
   | 'mainPasteShortcut'
+  | 'mainCopyShortcut'
   | 'acceptShortcut'
   | 'ai'
   | 'translateLanguages'
@@ -80,7 +84,7 @@ export const SECTIONS: readonly Section[] = [
     id: 'audio',
     title: 'Audio',
     summary: 'What goes into the microphone.',
-    settings: ['inputDevice', 'micGain'],
+    settings: ['inputDevice', 'echoCancellation', 'highPassFilter', 'micGain'],
   },
   {
     id: 'models',
@@ -105,10 +109,12 @@ export const SECTIONS: readonly Section[] = [
       'followShortcut',
       'translateShortcut',
       'askAiShortcut',
+      'generateShortcut',
       'fixShortcut',
       'shortenShortcut',
       'summarizeShortcut',
       'mainPasteShortcut',
+      'mainCopyShortcut',
       'acceptShortcut',
     ],
   },

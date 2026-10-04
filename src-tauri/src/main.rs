@@ -114,6 +114,17 @@ fn main() {
                 *app.state::<state::AppState>().hotkey_ok.lock().unwrap() = false;
             }
 
+            // Прогрев эхоподавления — в фоне, старт приложения не ждёт:
+            // VPIO-граф собирается сотни миллисекунд, и без прогрева их
+            // платило бы первое нажатие хоткея записи (см. audio.rs).
+            {
+                let state = app.state::<state::AppState>();
+                let s = state.settings.lock().unwrap();
+                if s.echo_cancellation {
+                    audio::prewarm_echo_cancellation(s.input_device.clone());
+                }
+            }
+
             let capture_hotkey = app
                 .state::<state::AppState>()
                 .settings

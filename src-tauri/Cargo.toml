@@ -14,6 +14,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 cpal = "0.15"
+# Та же версия, что тянет cpal (см. Cargo.lock) — дубликата в дереве нет.
+# Нужен ради Voice Processing I/O (системное эхоподавление macOS), которого
+# cpal не умеет.
+coreaudio-rs = "0.11"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["fs", "io-util", "sync", "macros"] }

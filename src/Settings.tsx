@@ -58,6 +58,7 @@ const MAX_WINDOW_OPACITY = 1
 const ACTION_SHORTCUT_ROWS: readonly { key: ActionShortcutKey; label: string }[] = [
   { key: 'translateShortcut', label: 'Translate' },
   { key: 'askAiShortcut', label: 'Ask AI' },
+  { key: 'generateShortcut', label: 'Generate' },
   { key: 'fixShortcut', label: 'Fix' },
   { key: 'shortenShortcut', label: 'Shorten' },
   { key: 'summarizeShortcut', label: 'Summarize' },
@@ -477,6 +478,35 @@ export function Settings() {
       )}
       {deviceError && <span className="err">{deviceError}</span>}
 
+      <label className="check-row">
+        <input
+          type="checkbox"
+          checked={s.echoCancellation}
+          onChange={(e) => patch({ echoCancellation: e.target.checked })}
+        />
+        Remove system audio from recordings (echo cancellation)
+      </label>
+      <p className="hint">
+        Uses the same macOS voice processing as FaceTime: whatever the Mac is playing — a video,
+        music — is subtracted from the microphone signal, so it doesn't end up in your dictation.
+        Also applies Apple's noise suppression, which slightly changes the recording's tone; turn
+        this off if you prefer the raw microphone. Applies to the next recording.
+      </p>
+
+      <label className="check-row">
+        <input
+          type="checkbox"
+          checked={s.highPassFilter}
+          onChange={(e) => patch({ highPassFilter: e.target.checked })}
+        />
+        High-pass filter (cut low-frequency rumble)
+      </label>
+      <p className="hint">
+        Removes everything below 80 Hz before speech detection and transcription — room rumble,
+        fans, desk thumps. Speech lives above that, so it loses nothing. The recording you play
+        back stays untouched. Applies to the next recording.
+      </p>
+
       <label>
         Microphone gain
         <div className="slider-row">
@@ -786,6 +816,23 @@ export function Settings() {
         Sends the text in the main window back to the app you dictated from — the same place the
         panel's Paste sends it. It has its own combination because the panel's default is a bare{' '}
         <code>Enter</code>, and in the main window Enter belongs to the editor.
+      </p>
+
+      {/* Copy главного окна — своя строка по той же причине, что и Paste
+          выше: не пункт дерева действий, а действие над готовым текстом. */}
+      <label>
+        Copy
+        <ShortcutCapture
+          value={s.mainCopyShortcut}
+          onChange={(accel) => patch({ mainCopyShortcut: accel })}
+          requireModifier
+          modifierError={ACTION_MODIFIER_ERROR}
+          validate={conflictCheck('mainCopyShortcut')}
+        />
+      </label>
+      <p className="hint">
+        Copies the text in the main window to the clipboard. The default <code>Cmd + C</code>{' '}
+        matches the panel's Copy — one habit for both windows; they never listen at the same time.
       </p>
 
       {/* Accept — своя строка по той же причине, что и Paste выше: это шаг

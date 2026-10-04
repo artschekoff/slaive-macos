@@ -29,6 +29,7 @@ export type Settings = {
    *  only fire while the main window is focused, never system-wide. */
   translateShortcut: string
   askAiShortcut: string
+  generateShortcut: string
   fixShortcut: string
   shortenShortcut: string
   summarizeShortcut: string
@@ -38,6 +39,10 @@ export type Settings = {
    *  window has no such action, so a bare Enter there would mean what it means
    *  in any editor — a new line. Default "Super+Enter" (Cmd+Return). */
   mainPasteShortcut: string
+  /** Window-level shortcut for the main window's Copy button. Separate field
+   *  from the panel's `copyShortcut` for the same reason as the Paste pair:
+   *  per-window combinations, same action. Default "Super+KeyC". */
+  mainCopyShortcut: string
   /** Window-level shortcut for Accept — the step that makes the model's
    *  proposal the text for good. Deliberately stiffer than Paste: accepting
    *  replaces what the user had, and the previous text is then only reachable
@@ -66,6 +71,19 @@ export type Settings = {
   /** Recording device name as `cpal` reports it. `null` = "System default",
    *  meaning follow the system — NOT "pin to whatever is default today". */
   inputDevice: string | null
+  /** System echo cancellation (macOS Voice Processing I/O): subtracts what
+   *  the Mac itself is playing from the mic signal, so a video in the
+   *  background doesn't end up in the dictation. Apple's voice processing
+   *  also applies its own noise suppression and gain control, which slightly
+   *  changes the recording's tone — hence the switch. Default on; if the
+   *  voice unit fails to start, recording silently falls back to the plain
+   *  path (see `Recorder::start` in audio.rs). */
+  echoCancellation: boolean
+  /** High-pass filter at 80 Hz applied before speech detection and
+   *  transcription: cuts room rumble and fan hum, which carry no speech.
+   *  Never applied to the raw recording (Play, history) — like `micGain`,
+   *  it's a recognition parameter, not a property of the recording. */
+  highPassFilter: boolean
   /** How opaque the app's windows are, 0.5–1.0, default 0.9. Applied as the
    *  native window alpha (`NSWindow.alphaValue`), so it covers the whole
    *  window — web content, the native title bar and the shadow alike — not

@@ -4161,6 +4161,7 @@ dependencies = [
  "anyhow",
  "core-foundation",
  "core-graphics",
+ "coreaudio-rs",
  "cpal",
  "futures-util",
  "keyring",
