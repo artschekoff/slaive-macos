@@ -47,6 +47,7 @@ test('нажатие корневого хоткея находит своё д�
   const find = (e: KeyEventLike) => nodeForKey(e, ACTION_TREE, atRoot, DEFAULT_ACTION_SHORTCUTS)?.id
   assert.equal(find(cmd('KeyL')), 'translate')
   assert.equal(find(cmd('KeyK')), 'ask-ai')
+  assert.equal(find(cmd('KeyG')), 'generate')
   assert.equal(find(cmd('KeyF')), 'fix')
   assert.equal(find(cmd('KeyS')), 'shorten')
   assert.equal(find(cmd('KeyU')), 'summarize')

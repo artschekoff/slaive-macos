@@ -64,6 +64,7 @@ import { formatShortcutBadge, matchesShortcut } from './shortcut'
 // бэкенде (src-tauri/src/settings.rs), как и DEFAULT_ACTION_SHORTCUTS рядом:
 // заглушка до первого ответа get_settings, дальше её перекрывает настройка.
 const DEFAULT_MAIN_PASTE_SHORTCUT = 'Super+Enter'
+const DEFAULT_MAIN_COPY_SHORTCUT = 'Super+KeyC'
 
 type FollowPayload = { text: string }
 
@@ -112,6 +113,8 @@ export function MainWindow() {
   }, [actionTree])
   const [applyState, setApplyState] = useState<ApplyState>(idleApplyState)
   const [actionError, setActionError] = useState<string | null>(null)
+  // Временное «Copied» на кнопке копирования — как в Overlay.tsx.
+  const [copied, setCopied] = useState(false)
   const [promptQuery, setPromptQuery] = useState('')
 
   // Столбец меню действий, переключаемый стрелками (бриф: "все кнопки в
@@ -203,6 +206,8 @@ export function MainWindow() {
   // не действие меню и в дереве его нет. Грузится и обновляется тем же
   // эффектом — источник настроек один.
   const [mainPasteShortcut, setMainPasteShortcut] = useState(DEFAULT_MAIN_PASTE_SHORTCUT)
+  // Copy — как Paste выше: действие над готовым текстом, не узел дерева.
+  const [mainCopyShortcut, setMainCopyShortcut] = useState(DEFAULT_MAIN_COPY_SHORTCUT)
   // Accept — по той же причине отдельным состоянием, что и Paste выше: это не
   // узел дерева действий, а шаг цикла применения (см. apply-state.ts).
   const [acceptShortcut, setAcceptShortcut] = useState(DEFAULT_ACCEPT_SHORTCUT)
@@ -210,6 +215,7 @@ export function MainWindow() {
     const take = (s: Settings): ActionShortcuts => ({
       translateShortcut: s.translateShortcut,
       askAiShortcut: s.askAiShortcut,
+      generateShortcut: s.generateShortcut,
       fixShortcut: s.fixShortcut,
       shortenShortcut: s.shortenShortcut,
       summarizeShortcut: s.summarizeShortcut,
@@ -217,6 +223,7 @@ export function MainWindow() {
     const apply = (s: Settings) => {
       setActionShortcuts(take(s))
       setMainPasteShortcut(s.mainPasteShortcut)
+      setMainCopyShortcut(s.mainCopyShortcut)
       setAcceptShortcut(s.acceptShortcut)
       // Строка, а не разобранный список: разбор и запасной дефолт живут в
       // одном месте (buildActionTree), а сравнение "поменялось ли" здесь
@@ -388,7 +395,11 @@ export function MainWindow() {
   const onPromptSubmit = () => {
     const prompt = menuState.prompt
     const query = promptQuery.trim()
-    if (!prompt || !hasText || !query || applyState.phase !== 'idle') return
+    if (!prompt || applyState.phase !== 'idle') return
+    // Обычному prompt-действию (Ask AI) нужны и текст, и запрос; узел с
+    // worksOnEmpty (Generate) запускается с любым их сочетанием, включая
+    // полностью пустое — «сгенерировать с нуля».
+    if (!prompt.worksOnEmpty && (!hasText || !query)) return
     const { system, user } = prompt.buildRequest(currentText(), query)
     runRequest(system, user)
   }
@@ -463,6 +474,20 @@ export function MainWindow() {
   // шлёт свои ошибки туда, — а главное окно к этому моменту уже скрыто. Текст
   // при этом в буфере, и сообщение оверлея прямо об этом говорит. Усложнять
   // (адресовать ошибку окну-инициатору) — если этот путь окажется частым.
+  // Копирование — тот же путь, что у Copy в Overlay.tsx: прав не требует,
+  // работает даже когда Paste выключен (нет приложения-цели). Ошибку кладём в
+  // общий actionError, успех — во временное подтверждение на самой кнопке.
+  const onCopy = () => {
+    const value = currentText()
+    if (!value) return
+    copyText(value)
+      .then(() => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      })
+      .catch((e) => setActionError(String(e)))
+  }
+
   const onPaste = () => {
     if (!canPaste) return
     const value = currentText()
@@ -622,13 +647,25 @@ export function MainWindow() {
         return
       }
 
+      // Copy — как Paste выше: доступен с любого вида, пока есть текст.
+      // Прав не требует (см. onCopy), поэтому guard один — на пустой текст.
+      if (matchesShortcut(e, mainCopyShortcut)) {
+        if (!hasText) return
+        e.preventDefault()
+        onCopy()
+        return
+      }
+
       // Пока открыта история, сетки действий на экране нет — срабатывать их
       // хоткеям не по чему. Paste выше остаётся: текст в редакторе никуда не
       // делся, и отправить его можно с любого вида. Тот же довод, что у
       // условия «какие кнопки сейчас нарисованы, решает level».
       if (showHistory) return
 
-      if (!hasText || applyState.phase !== 'idle' || showingPrompt) return
+      // Пустой текст больше не выключает всю клавиатуру меню: Generate
+      // (worksOnEmpty) обязан запускаться и с пустого редактора. Доступность
+      // конкретного пункта проверяется ниже, в точках активации.
+      if (applyState.phase !== 'idle' || showingPrompt) return
 
       // Стрелки/Home/End БЕЗ предварительного Tab — см. arrow-routing.ts и
       // отчёт. Работает только пока список ЕЩЁ не получил настоящий
@@ -680,6 +717,7 @@ export function MainWindow() {
 
       const node = nodeForKey(e, level, atRoot, actionShortcuts)
       if (!node) return
+      if (!hasText && !node.worksOnEmpty) return
       e.preventDefault()
       if (node.kind === 'leaf') onLeafClick(node)
       else setMenuState(enterNode(menuState, node))
@@ -687,6 +725,57 @@ export function MainWindow() {
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
   })
+
+  // Плавная высота нижней области меню — переходы между уровнями, промптом,
+  // историей и панелью Accept/Cancel меняют состав мгновенно, а ВЫСОТА
+  // контейнера доезжает анимацией, как у листов macOS. Устройство: внешний
+  // .mw-menu анимирует height, внутренний .mw-menu-inner никогда не зажат и
+  // всегда меряется натуральной высотой (поэтому не нужно снимать инлайн-
+  // стили посреди анимации, чтобы узнать цель). ResizeObserver на внутреннем
+  // ловит любую причину смены высоты — навигацию, появление строки ошибки,
+  // перенос кнопок при ресайзе окна — без перечисления этих причин руками.
+  // Прерывание безопасно: from берётся из текущей (в том числе полу-
+  // проехавшей) высоты внешнего, анимация просто перенацеливается.
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const menuInnerRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const outer = menuRef.current
+    const inner = menuInnerRef.current
+    if (!outer || !inner) return
+    let target: number | null = null
+    const ro = new ResizeObserver(() => {
+      const to = inner.offsetHeight
+      if (target !== null && Math.abs(target - to) < 1) return
+      const from = outer.getBoundingClientRect().height
+      target = to
+      if (Math.abs(from - to) < 1) return
+      // Тот же контракт, что у переходов панелей в styles.css: при
+      // reduced-motion высота меняется мгновенно, без анимации.
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+      outer.style.height = `${from}px`
+      outer.style.overflow = 'hidden'
+      void outer.offsetHeight // reflow: from должен примениться до transition
+      // 200мс — в такт боковому скольжению панелей; кривая — системная
+      // маковская (та же, что у листов), резкий старт и мягкий доезд.
+      outer.style.transition = 'height 200ms cubic-bezier(0.32, 0.72, 0, 1)'
+      outer.style.height = `${to}px`
+    })
+    ro.observe(inner)
+    const done = (e: TransitionEvent) => {
+      if (e.propertyName !== 'height') return
+      // Возврат к height: auto — между переходами контейнер живёт обычной
+      // жизнью потока, инлайн-фиксация существует только на время анимации.
+      outer.style.transition = ''
+      outer.style.height = ''
+      outer.style.overflow = ''
+      target = null
+    }
+    outer.addEventListener('transitionend', done)
+    return () => {
+      ro.disconnect()
+      outer.removeEventListener('transitionend', done)
+    }
+  }, [])
 
   // Содержимое ТЕКУЩЕГО уровня меню (список кнопок или форма Ask AI) — как
   // JSX и как ключ, которым отличаем один уровень от другого. Строится
@@ -711,7 +800,7 @@ export function MainWindow() {
         className="mw-prompt-input"
         value={promptQuery}
         placeholder={menuState.prompt!.placeholder}
-        disabled={!hasText}
+        disabled={!hasText && !menuState.prompt!.worksOnEmpty}
         onChange={(e) => setPromptQuery(e.target.value)}
         onFocus={() => {
           menuHadFocusRef.current = true
@@ -727,7 +816,13 @@ export function MainWindow() {
           над сеткой (.mw-trail ниже) вместе с возвратом из подменю — одно
           место на весь возврат, при любой глубине и любом числе кнопок. */}
       <div className="action-grid action-grid-1">
-        <button className="primary" disabled={!hasText || !promptQuery.trim()} onClick={onPromptSubmit}>
+        <button
+          className="primary"
+          // Generate (worksOnEmpty) отправляется всегда — и с пустым сидом,
+          // и с пустым текстом; Ask AI по-прежнему требует и то и другое.
+          disabled={!menuState.prompt!.worksOnEmpty && (!hasText || !promptQuery.trim())}
+          onClick={onPromptSubmit}
+        >
           Send
         </button>
       </div>
@@ -769,6 +864,19 @@ export function MainWindow() {
       }}
       onKeyDown={(e) => {
         if (level.length === 0) return
+        // Vim-навигация по списку: j/k — те же движения, что ArrowDown/Up.
+        // Работает только когда фокус УЖЕ на списке (этот обработчик) — в
+        // редакторе j/k остаются vim-моушенами по строкам текста, отбирать
+        // их глобально нельзя. Голые клавиши, без модификаторов: ⌘K и
+        // прочие хоткеи действий уже обработаны глобальным перехватчиком,
+        // но тот не гасит всплытие — без проверки ⌘K двигал бы выбор.
+        if ((e.key === 'j' || e.key === 'k') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+          e.preventDefault()
+          setSelectedIndex((i) =>
+            e.key === 'j' ? moveSelectionDown(i, level.length) : moveSelectionUp(i, level.length)
+          )
+          return
+        }
         switch (e.key) {
           case 'ArrowDown':
             e.preventDefault()
@@ -788,11 +896,11 @@ export function MainWindow() {
             return
           case 'Enter': {
             // Активирует подсвеченный пункт — тот же переход, что у клика по
-            // нему. Условие недоступности (пустой текст) то же самое, что у
-            // самих кнопок ниже (disabled={!hasText}).
-            if (!hasText) return
-            e.preventDefault()
+            // нему. Условие недоступности то же самое, что у самих кнопок
+            // ниже (пустой текст, кроме узлов с worksOnEmpty).
             const node = level[selectedGridIndex]
+            if (!hasText && !node.worksOnEmpty) return
+            e.preventDefault()
             if (node.kind === 'leaf') onLeafClick(node)
             else setMenuState(enterNode(menuState, node))
             return
@@ -818,7 +926,7 @@ export function MainWindow() {
             // через контейнер.
             tabIndex={-1}
             className={selected ? 'is-selected' : undefined}
-            disabled={!hasText}
+            disabled={!hasText && !node.worksOnEmpty}
             onClick={() => (node.kind === 'leaf' ? onLeafClick(node) : setMenuState(enterNode(menuState, node)))}
           >
             {node.label}
@@ -945,6 +1053,18 @@ export function MainWindow() {
           )
         )}
         <button
+          className="mw-copy"
+          disabled={!hasText}
+          onClick={onCopy}
+          title="Copy the text to the clipboard"
+        >
+          {copied ? 'Copied' : (
+            <>
+              Copy <span className="shortcut-badge">{formatShortcutBadge(mainCopyShortcut)}</span>
+            </>
+          )}
+        </button>
+        <button
           className="primary mw-paste"
           disabled={!canPaste}
           onClick={onPaste}
@@ -960,10 +1080,10 @@ export function MainWindow() {
 
       <div className="mw-editor-row">
         <div className="transcript-field" ref={editorContainerRef} />
-        <span className={`vim-mode vim-mode-${vimMode} mw-vim-mode`}>{vimMode.toUpperCase()}</span>
       </div>
 
-      <div className="mw-menu">
+      <div className="mw-menu" ref={menuRef}>
+        <div className="mw-menu-inner" ref={menuInnerRef}>
         {actionError && (
           <div className="mw-error">
             <span>{actionError}</span>
@@ -1043,6 +1163,7 @@ export function MainWindow() {
               </button>
             )
           )}
+          <span className={`vim-mode vim-mode-${vimMode} mw-vim-mode`}>{vimMode.toUpperCase()}</span>
           {!showHistory && (
             <button
               type="button"
@@ -1120,6 +1241,7 @@ export function MainWindow() {
               {idlePanelNode}
             </div>
           )}
+        </div>
         </div>
       </div>
 

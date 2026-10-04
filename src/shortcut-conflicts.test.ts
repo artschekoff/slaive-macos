@@ -26,6 +26,7 @@ const settings = {
   copyShortcut: DEFAULT_COPY_SHORTCUT,
   followShortcut: DEFAULT_FOLLOW_SHORTCUT,
   mainPasteShortcut: 'Super+Enter',
+  mainCopyShortcut: 'Super+KeyC',
   acceptShortcut: DEFAULT_ACCEPT_SHORTCUT,
   ...DEFAULT_ACTION_SHORTCUTS,
 }

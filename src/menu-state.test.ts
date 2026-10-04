@@ -24,10 +24,10 @@ test('root state starts at the root of ACTION_TREE and is flagged as root', () =
   assert.equal(menuDepth(s), 1)
 })
 
-test('root exposes exactly the five actions from the brief', () => {
+test('root exposes exactly the six root actions', () => {
   const s = rootMenuState()
   const ids = currentLevel(s).map((n) => n.id)
-  assert.deepEqual(ids, ['translate', 'ask-ai', 'fix', 'shorten', 'summarize'])
+  assert.deepEqual(ids, ['translate', 'ask-ai', 'generate', 'fix', 'shorten', 'summarize'])
 })
 
 // Дерево живого окна строится из настройки языков, а не берётся из ACTION_TREE

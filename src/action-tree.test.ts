@@ -12,18 +12,39 @@ import {
   type BranchNode,
   type LeafNode,
   type MenuNode,
+  type PromptNode,
 } from './action-tree.ts'
 
 const translateOf = (tree: MenuNode[]) => tree.find((n) => n.id === 'translate') as BranchNode
 const leafOf = (tree: MenuNode[], id: string) => tree.find((n) => n.id === id) as LeafNode
 
-test('корень — пять действий, у каждого свой ключ хоткея', () => {
+test('корень — шесть действий, настраиваемые хоткеи не делятся на двоих', () => {
   assert.deepEqual(
     ACTION_TREE.map((n) => n.label),
-    ['Translate', 'Ask AI', 'Fix', 'Shorten', 'Summarize']
+    ['Translate', 'Ask AI', 'Generate', 'Fix', 'Shorten', 'Summarize']
   )
-  const keys = ACTION_TREE.map((n) => n.shortcutKey)
+  const keys = ACTION_TREE.map((n) => n.shortcutKey).filter(Boolean)
   assert.equal(new Set(keys).size, keys.length, 'два действия делят одну настройку хоткея')
+})
+
+test('Generate шлёт текст поля как инструкцию, а не как объект правки', () => {
+  const generate = ACTION_TREE.find((n) => n.id === 'generate') as PromptNode
+  const { system, user } = generate.buildRequest('напиши Дэну, что я опаздываю', '')
+  assert.match(system, /request/, 'системный промпт должен трактовать текст как запрос')
+  assert.equal(user, 'напиши Дэну, что я опаздываю')
+})
+
+test('Generate доступен на пустом тексте, сид опционален с обеих сторон', () => {
+  const generate = ACTION_TREE.find((n) => n.id === 'generate') as PromptNode
+  assert.equal(generate.worksOnEmpty, true)
+  // Только сид — генерация с нуля по подсказке.
+  assert.equal(generate.buildRequest('', 'тема: отпуск').user, 'тема: отпуск')
+  // Сид + текст — сид первым, разделены пустой строкой.
+  assert.equal(generate.buildRequest('текст', 'сид').user, 'сид\n\nтекст')
+  // Совсем пусто — пустой запрос, empty-случай закрывает системный промпт.
+  const empty = generate.buildRequest('', '')
+  assert.equal(empty.user, '')
+  assert.match(empty.system, /If the request is empty/)
 })
 
 test('по умолчанию переводим на три языка из брифа', () => {

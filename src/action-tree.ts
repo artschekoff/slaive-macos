@@ -18,6 +18,7 @@ export type AiActionRequest = { system: string; user: string }
 export type ActionShortcutKey =
   | 'translateShortcut'
   | 'askAiShortcut'
+  | 'generateShortcut'
   | 'fixShortcut'
   | 'shortenShortcut'
   | 'summarizeShortcut'
@@ -27,6 +28,10 @@ export type LeafNode = {
   id: string
   label: string
   shortcutKey?: ActionShortcutKey
+  /** Действию не нужен текст в поле: оно доступно и на пустом редакторе.
+   *  По умолчанию (undefined) текст обязателен — Fix/Translate и прочим
+   *  без текста нечего обрабатывать. Сейчас флаг несёт только Generate. */
+  worksOnEmpty?: boolean
   /** Выполняется сразу по клику — без промежуточного экрана. */
   buildRequest: (text: string) => AiActionRequest
 }
@@ -37,6 +42,9 @@ export type PromptNode = {
   label: string
   placeholder: string
   shortcutKey?: ActionShortcutKey
+  /** См. LeafNode.worksOnEmpty. Для prompt-узла флаг значит ещё и «запрос
+   *  необязателен»: Generate можно запускать вовсе без входных данных. */
+  worksOnEmpty?: boolean
   /** Как у LeafNode, но с дополнительным свободным запросом пользователя. */
   buildRequest: (text: string, query: string) => AiActionRequest
 }
@@ -46,6 +54,7 @@ export type BranchNode = {
   id: string
   label: string
   shortcutKey?: ActionShortcutKey
+  worksOnEmpty?: boolean
   children: MenuNode[]
 }
 
@@ -90,6 +99,19 @@ const translateSystem = (language: string) =>
   `You translate the given text to ${language}. Reply with only the translation, nothing else — no explanations, no quotes around it.`
 const ASK_AI_SYSTEM =
   'You edit or answer questions about the given text as the user instructs, and reply with only the result text to use in place of the original — no explanations, no quotes around it.'
+
+// Generate — обратная роль текста поля: не объект действия, а сама
+// инструкция. Пользователь нажал хоткей захвата без выделения (курсор стоит
+// в поле ввода), окно открылось пустым, он надиктовал «напиши Дэну, что я
+// опаздываю» — и по этой инструкции модель пишет готовый текст для вставки.
+// Работает и совсем с нуля: поле пустое, опциональный сид (тема/набросок/
+// стиль) вводится в prompt-строке, а при пустом сиде модель пишет короткую
+// нейтральную заготовку.
+const GENERATE_SYSTEM =
+  'The given text is the user’s request, usually dictated by voice: write the text it asks ' +
+  'for, in the language the request implies. If the request is empty, write a short ' +
+  'neutral placeholder paragraph. Reply with only the text to insert — no ' +
+  'explanations, no preamble, no quotes around it.'
 
 /** Дефолтные языки перевода — та же строка, что в Settings::default() на
  *  бэкенде (src-tauri/src/settings.rs, DEFAULT_TRANSLATE_LANGUAGES). Здесь она
@@ -171,6 +193,21 @@ export function buildActionTree(rawLanguages: string = DEFAULT_TRANSLATE_LANGUAG
       buildRequest: (text, query) => ({
         system: ASK_AI_SYSTEM,
         user: `Instruction: ${query}\n\nText:\n${text}`,
+      }),
+    },
+    {
+      kind: 'prompt',
+      id: 'generate',
+      label: 'Generate',
+      shortcutKey: 'generateShortcut',
+      worksOnEmpty: true,
+      placeholder: 'optional seed: topic, draft or style',
+      // Сид и надиктованный текст складываются в один запрос: сид первым —
+      // это уточнение сверху («деловым тоном»), текст поля — сама инструкция
+      // или черновик. Любая из частей может отсутствовать.
+      buildRequest: (text, query) => ({
+        system: GENERATE_SYSTEM,
+        user: [query.trim(), text.trim()].filter(Boolean).join('\n\n'),
       }),
     },
     leaf('fix', 'Fix', (text) => ({ system: FIX_SYSTEM, user: text }), 'fixShortcut'),

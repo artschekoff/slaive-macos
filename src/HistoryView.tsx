@@ -278,6 +278,20 @@ export function HistoryView({
           tabIndex={0}
           aria-activedescendant={`history-option-${entries![selectedGridIndex].id}`}
           onKeyDown={(e) => {
+            // Vim-навигация hjkl — только на фокусном пути (этот обработчик):
+            // пока фокус в редакторе, hjkl остаются vim-моушенами текста, и
+            // оконный слушатель выше их намеренно не трогает. Голые клавиши,
+            // без модификаторов — ⌘-хоткеи окна не должны двигать выбор.
+            if (!e.metaKey && !e.ctrlKey && !e.altKey) {
+              const arrow = { h: 'ArrowLeft', j: 'ArrowDown', k: 'ArrowUp', l: 'ArrowRight' }[
+                e.key
+              ]
+              if (arrow) {
+                if (handleGridKey({ key: arrow } as ReactKeyboardEvent<HTMLDivElement>))
+                  e.preventDefault()
+                return
+              }
+            }
             if (handleGridKey(e)) e.preventDefault()
           }}
         >

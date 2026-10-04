@@ -36,16 +36,7 @@ import {
   type VimMode,
 } from './transcript-editor'
 import { resampleLevels } from './levels'
-import robot0 from './assets/robot-0.png'
-import robot1 from './assets/robot-1.png'
-import robot2 from './assets/robot-2.png'
-import robot3 from './assets/robot-3.png'
-
-// Кадры рта заводного робота: закрыт → приоткрыт → полуоткрыт → распахнут.
-// Индекс выбирается по последнему замеру уровня, а тот уже нормирован в
-// 0..100 тем же опорным значением, что и высота столбиков дорожки — робот
-// артикулирует в одной шкале с ней, а не в своей собственной.
-const ROBOT_FRAMES = [robot0, robot1, robot2, robot3]
+import micIcon from './assets/mic.png'
 
 type Phase = 'idle' | 'recording' | 'transcribing' | 'ready' | 'error'
 
@@ -563,7 +554,7 @@ export function Overlay() {
         setError(e.payload)
         setPhase('error')
         // Обычная ошибка может прийти после отказа в правах — флаг из того
-        // случая не должен пережить её и оставить лишнюю кнопку в панели.
+        // случая не должен пережить её и оставить модальный слой поверх панели.
         setPermissionPane(null)
       }),
       listen<AccessibilityErrorPayload>('error:accessibility', (e) => {
@@ -584,8 +575,8 @@ export function Overlay() {
       setError(e.payload)
       setPhase('error')
       // Та же причина, что у обычной 'error' выше: флаг из более раннего
-      // отказа в правах не должен пережить эту ошибку и оставить в панели
-      // лишнюю кнопку «Open System Settings».
+      // отказа в правах не должен пережить эту ошибку и оставить поверх
+      // панели модальный слой с «Open Settings».
       setPermissionPane(null)
       // Показывать панель здесь не нужно: захват мог не открывать её вовсе,
       // но это делает Rust перед отправкой события (show_overlay в
@@ -598,17 +589,19 @@ export function Overlay() {
     }
   }, [])
 
-  // Рот раскрывается по громкости последнего замера. Вне записи — закрыт:
-  // молчащий робот с закрытым ртом во время речи это ещё и вторая
-  // диагностика к дорожке — микрофон не слышит.
+  // Голос в кадре: 0 — тишина/не пишем, 1..3 — ступени громкости. По нему
+  // микрофон слегка «дышит» масштабом, а бейдж ON AIR загорается красным.
+  // Вне записи — всегда 0: горящий бейдж при молчащем микрофоне врал бы, а
+  // неподвижная иконка во время речи — вторая диагностика к дорожке
+  // (микрофон не слышит).
   // Берём максимум за последние 4 замера (~200 мс), а не последний: замеры
-  // идут 20 раз в секунду, и по одному отсчёту рот дёргался бы между кадрами
-  // на каждом слоге. Сглаживание здесь — свойство картинки, а не измерения:
-  // дорожка уровня по-прежнему рисует каждый сырой замер без усреднения.
-  const robotFrame =
+  // идут 20 раз в секунду, и по одному отсчёту анимация дёргалась бы между
+  // кадрами на каждом слоге. Шкала та же, что у столбиков дорожки (0..100).
+  const voiceLevel =
     phase === 'recording' && levels.length > 0
       ? Math.min(3, Math.max(0, Math.floor(Math.max(...levels.slice(-4)) / 25)))
       : 0
+  const speaking = voiceLevel > 0
 
   const toggleMic = () => {
     // Во время расшифровки микрофон неактивен: предыдущая запись ещё
@@ -735,6 +728,11 @@ export function Overlay() {
   useEffect(() => {
     showAccessModalRef.current = showAccessModal
   }, [showAccessModal])
+  // Тот же приём для второго модального слоя — «отказано в праве».
+  const permissionPaneRef = useRef(permissionPane)
+  useEffect(() => {
+    permissionPaneRef.current = permissionPane
+  }, [permissionPane])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -746,6 +744,10 @@ export function Overlay() {
         // закрытия слоя.
         if (showAccessModalRef.current) {
           setShowAccessModal(false)
+          return
+        }
+        if (permissionPaneRef.current) {
+          setPermissionPane(null)
           return
         }
         if (editorFocused) return // редактор/vim разберётся сам
@@ -914,15 +916,23 @@ export function Overlay() {
     setIsPlaying(true)
   }
 
-  // Кнопка Play должна быть недоступна, пока звук играет, а не перезапускать
-  // проигрывание повторным нажатием. isPlaying взводится сразу по клику —
-  // это закрывает окно между кликом и разрешением ensurePcm, в которое иначе
-  // могло бы проскочить повторное нажатие. Гасится он на любом пути, где
-  // реального проигрывания не случилось (пустой буфер, отказ ensurePcm), и
-  // на естественном завершении в onended — иначе кнопка осталась бы
-  // залипшей disabled. Play всегда начинает с начала записи — в отличие от
-  // перемотки, это «послушать заново», а не «доиграть с места».
-  const onPlay = () => {
+  // Кнопка — переключатель Play/Pause: пока звук играет, она показывает ⏸ и
+  // останавливает проигрывание (см. JSX кнопки ниже). isPlaying взводится
+  // сразу по клику — это закрывает окно между кликом и разрешением
+  // ensurePcm, в которое иначе могло бы проскочить повторное нажатие.
+  // Гасится он на любом пути, где реального проигрывания не случилось
+  // (пустой буфер, отказ ensurePcm), и на естественном завершении в onended.
+  // Play всегда начинает с начала записи — в отличие от перемотки, это
+  // «послушать заново», а не «доиграть с места».
+  // ponytail: пауза — это стоп, без запоминания позиции; возобновление с
+  // места — когда записи станут настолько длинными, что «с начала» будет
+  // раздражать (playFrom уже умеет offset).
+  const onPlayPause = () => {
+    if (isPlaying) {
+      stopPlayback()
+      setIsPlaying(false)
+      return
+    }
     setIsPlaying(true)
     ensurePcm()
       .then((pcm) => {
@@ -1019,7 +1029,17 @@ export function Overlay() {
   }, [isPlaying, duration])
 
   return (
-    <div className="overlay chassis" ref={rootRef}>
+    // data-tauri-drag-region на корне: Tauri стартует перетаскивание только
+    // когда нажатие пришлось РОВНО в элемент с атрибутом (event.target, не
+    // ближайший предок), поэтому любое пустое место панели — padding, зазоры
+    // между рядами — двигает окно, а всё интерактивное (кнопки, редактор,
+    // дорожка с перемоткой) остаётся собой: нажатие в них попадает в ребёнка
+    // без атрибута. Тот же атрибут стоит на «мёртвых» текстовых узлах ниже
+    // (шапка источника, строка статуса) — их собственные узлы иначе съели бы
+    // нажатие; полоса сверху (.overlay-drag-region) остаётся для верхнего
+    // padding, где нажатие перехватывал бы корень, но полоса была раньше и
+    // держит зону между угловыми кнопками.
+    <div className="overlay chassis" ref={rootRef} data-tauri-drag-region>
       {/* Close переехал сюда из ряда действий (часть 1 брифа) — это
           закрытие окна, а не действие над результатом, и вешается в
           привычный верхний угол панели, как обычно закрываются панели.
@@ -1079,24 +1099,49 @@ export function Overlay() {
         ×
       </button>
       {sourceApp && (
-        <div className="source-app">
-          {sourceApp.icon && <img className="source-app-icon" src={sourceApp.icon} alt="" />}
-          <span className="source-app-name">{sourceApp.name}</span>
+        // Шапка не интерактивна — за неё естественно браться, чтобы двигать
+        // панель, поэтому атрибут и на контейнере, и на самих узлах текста и
+        // иконки: Tauri смотрит ровно на event.target (см. корень выше).
+        <div className="source-app" data-tauri-drag-region>
+          {sourceApp.icon && (
+            <img
+              className="source-app-icon"
+              src={sourceApp.icon}
+              alt=""
+              draggable={false}
+              data-tauri-drag-region
+            />
+          )}
+          <span className="source-app-name" data-tauri-drag-region>{sourceApp.name}</span>
         </div>
       )}
-      <div className="row">
+      {/* Атрибут на ряду — двигает окно только пустое место ряда: нажатие в
+          микрофон или бейдж режима попадает в их собственные узлы. */}
+      <div className="row" data-tauri-drag-region>
         <div
           className={`mic ${phase === 'recording' ? 'live' : ''} ${phase === 'transcribing' ? 'busy' : ''}`}
           onClick={toggleMic}
         >
+          {/* Иконка «дышит» масштабом по громкости — та же шкала 0..3, что
+              раньше раскрывала рот роботу. transition на .mic-icon сглаживает
+              шаги между замерами. */}
           <img
-            className="mic-robot"
-            src={ROBOT_FRAMES[robotFrame]}
+            className="mic-icon"
+            src={micIcon}
             alt=""
             draggable={false}
+            style={{ transform: `scale(${1 + voiceLevel * 0.06})` }}
           />
         </div>
-        <div className="status">{phase === 'error' ? error : LABEL[phase]}</div>
+        {/* ON AIR — горит красным только пока в записи слышен голос; в
+            тишине и вне записи бейдж гаснет до нейтрального. Это индикатор
+            «меня сейчас слышно», а не «идёт запись» — про запись говорят
+            красная кнопка и статус. */}
+        <span className={`onair${speaking ? ' live' : ''}`} data-tauri-drag-region>
+          ON AIR
+        </span>
+        {/* Строка статуса — тоже мёртвый текст: пусть тянет окно (см. корень). */}
+        <div className="status" data-tauri-drag-region>{phase === 'error' ? error : LABEL[phase]}</div>
         {/* Индикатор Vim-режима — виден только пока панель реально готова к
             редактированию (ready): в остальных фазах фокуса на редакторе нет
             и режим не имеет смысла показывать (см. фокус-репорт). Без него
@@ -1151,20 +1196,19 @@ export function Overlay() {
             <div className="playhead" style={{ left: `${playheadPct * 100}%` }} />
           )}
         </div>
-        {/* Часть 1: пульсация во время проигрывания — мягкий индикатор
-            активности аппаратуры (.overlay button.playing / @keyframes
-            play-pulse в styles.css), а не тревожное мигание. Кнопка
-            остаётся заблокированной, пока играет звук, — прежнее решение,
-            не тронуто, только переехала из ряда действий сюда. */}
+        {/* Пульсация во время проигрывания — мягкий индикатор активности
+            (.overlay button.playing / @keyframes play-pulse в styles.css).
+            Во время проигрывания кнопка НЕ блокируется, а превращается в
+            Pause: повторное нажатие останавливает звук (onPlayPause). */}
         <button
           type="button"
           className={`play-transport ${isPlaying ? 'playing' : ''}`}
-          disabled={!hasRecording || isPlaying || phase === 'recording'}
-          onClick={onPlay}
-          aria-label="Play"
-          title="Play"
+          disabled={!hasRecording || phase === 'recording'}
+          onClick={onPlayPause}
+          aria-label={isPlaying ? 'Pause' : 'Play'}
+          title={isPlaying ? 'Pause' : 'Play'}
         >
-          ▶
+          {isPlaying ? '⏸' : '▶'}
         </button>
       </div>
       {/* Часть 3/Vim: было read-only div, потом textarea, теперь CodeMirror с
@@ -1186,10 +1230,11 @@ export function Overlay() {
           бейдж хоткея внутри кнопки не должны переноситься на разные
           строки ни при какой ширине колонки (см. .action-grid button ниже),
           поэтому сетка с фиксированным числом колонок, а не флекс-строка.
-          3 кнопки в 3 колонки — один ряд, без переноса; появление
-          Open Settings (редкий случай permissionPane) уходит на второй
-          ряд — окно и так теперь подстраивает высоту под контент (часть 2),
-          так что лишний ряд не обрезается. */}
+          3 кнопки в 3 колонки — один ряд, без переноса. Open Settings
+          (случай permissionPane) здесь больше не появляется: четвёртая
+          кнопка переносилась на второй ряд и ломала разметку — отказ в
+          правах показывается модальным слоем ниже, как и «нет права на
+          вставку». */}
       <div className="actions action-grid action-grid-3">
         <button className="primary" disabled={!hasText} onClick={onPaste}>
           Paste <span className="shortcut-badge">{formatShortcutBadge(pasteShortcut)}</span>
@@ -1207,10 +1252,31 @@ export function Overlay() {
         <button disabled={!hasText} onClick={onFollow}>
           Follow <span className="shortcut-badge">{formatShortcutBadge(followShortcut)}</span>
         </button>
-        {permissionPane && (
-          <button onClick={() => openPrivacyPane(permissionPane)}>Open Settings</button>
-        )}
       </div>
+      {/* Модальный слой "отказано в праве" (permissionPane) — перекрывает
+          всю панель, как и слой Paste ниже: инлайн-кнопкой в сетке действий
+          он переносился на второй ряд и ломал разметку. Тоже НЕ ловушка:
+          Escape и Close закрывают слой, сообщение об ошибке остаётся в
+          статусной строке панели (phase === 'error'). */}
+      {permissionPane && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="modal" role="dialog" aria-modal="true" aria-label="Permission required">
+            <p className="modal-text">{error}</p>
+            <div className="modal-actions">
+              <button
+                className="primary"
+                onClick={() => {
+                  openPrivacyPane(permissionPane)
+                  setPermissionPane(null)
+                }}
+              >
+                Open Settings
+              </button>
+              <button onClick={() => setPermissionPane(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Модальный слой "нет права на вставку" — перекрывает всю панель.
           Показывается сразу по нажатию Paste, когда право уже отсутствует
           (см. onPaste), не после попытки. НЕ ловушка: Escape (см. глобальный

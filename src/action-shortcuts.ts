@@ -19,7 +19,7 @@ export type ActionShortcuts = Record<ActionShortcutKey, string>
 // — та же роль, что у DEFAULT_PASTE_SHORTCUT в shortcut.ts: заглушка до
 // первого ответа get_settings, дальше её перекрывают реальные значения.
 //
-// Почему все пять с Cmd. Поле текста в главном окне — CodeMirror с Vim.
+// Почему все шесть с Cmd. Поле текста в главном окне — CodeMirror с Vim.
 // В normal-режиме любая голая буква это команда, в insert-режиме голая буква
 // это ввод, а Ctrl-комбинации разобраны и там и там (Ctrl-r, Ctrl-o, Ctrl-w,
 // Ctrl-v…). Модификатора Cmd в грамматике Vim нет вовсе — поэтому Cmd+буква
@@ -37,6 +37,7 @@ export type ActionShortcuts = Record<ActionShortcutKey, string>
 export const DEFAULT_ACTION_SHORTCUTS: ActionShortcuts = {
   translateShortcut: 'Super+KeyL',
   askAiShortcut: 'Super+KeyK',
+  generateShortcut: 'Super+KeyG',
   fixShortcut: 'Super+KeyF',
   shortenShortcut: 'Super+KeyS',
   summarizeShortcut: 'Super+KeyU',
