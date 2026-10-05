@@ -296,16 +296,21 @@ mod vpio {
         scratch: Vec<f32>,
     }
 
-    /// Собранный, но НЕинициализированный VPIO-граф. Сборка (создание
-    /// компонента + свойства) дорогая, поэтому юнит живёт МЕЖДУ записями;
-    /// инициализация же происходит в begin и снимается в end — macOS
-    /// включает голосовой режим (и приглушение чужого звука) уже на
-    /// AudioUnitInitialize, и инициализированный юнит в простое глушил бы
-    /// системный звук всё время работы приложения. Пока юнит стоит,
-    /// микрофон не захватывается и индикатор системы не горит.
+    /// Собранный VPIO-граф. Сборка (создание компонента + свойства) дорогая,
+    /// поэтому юнит живёт МЕЖДУ записями. Инициализация — ленивая, один раз
+    /// на первом begin, и дальше НЕ снимается: AudioUnitInitialize у VPIO
+    /// стоит сотни миллисекунд, и плата за него на каждом старте записи —
+    /// это ровно та задержка «нажал хоткей → ON AIR», на которую жаловался
+    /// пользователь. Приглушение чужого звука инициализированным юнитом в
+    /// простое держит на нуле дакинг-конфигурация Min (см. build); если на
+    /// какой-то системе простой всё же начнёт глушить звук — возвращать
+    /// uninitialize в end, но с отложенным таймером, а не сразу.
+    /// Пока юнит остановлен, микрофон не захватывается и индикатор системы
+    /// не горит.
     pub struct Engine {
         unit: ca::AudioUnit,
         ctx: *mut Ctx,
+        initialized: std::sync::atomic::AtomicBool,
         pub input_device: ca::AudioDeviceID,
         pub output_device: ca::AudioDeviceID,
     }
@@ -317,34 +322,58 @@ mod vpio {
     unsafe impl Send for Engine {}
 
     impl Engine {
-        /// Начинает запись: инициализирует юнит, подставляет приёмники и
-        /// запускает захват. Инициализация здесь, а не в build, — см.
-        /// комментарий у Engine: только на время записи.
+        /// Начинает запись: при первом вызове инициализирует юнит (лениво,
+        /// см. комментарий у Engine), подставляет приёмники и запускает
+        /// захват. Замеры в лог — числа, не содержимое.
         pub fn begin(
             &self,
             buffer: Arc<Mutex<Vec<f32>>>,
             peaks: Arc<Mutex<Vec<f32>>>,
         ) -> anyhow::Result<()> {
+            use std::sync::atomic::Ordering;
             unsafe {
-                check(ca::AudioUnitInitialize(self.unit), "initialize vpio")?;
+                if !self.initialized.load(Ordering::Acquire) {
+                    let t = std::time::Instant::now();
+                    check(ca::AudioUnitInitialize(self.unit), "initialize vpio")?;
+                    self.initialized.store(true, Ordering::Release);
+                    log::info!("vpio: инициализация {} мс", t.elapsed().as_millis());
+                }
                 if let Ok(mut s) = (*self.ctx).sinks.lock() {
                     *s = Some((buffer, peaks));
                 }
+                let t = std::time::Instant::now();
                 let started = check(ca::AudioOutputUnitStart(self.unit), "start vpio");
-                if started.is_err() {
-                    ca::AudioUnitUninitialize(self.unit);
+                if started.is_ok() {
+                    log::info!("vpio: старт захвата {} мс", t.elapsed().as_millis());
                 }
                 started
             }
         }
 
-        /// Останавливает запись и снимает инициализацию: в простое юнит не
-        /// должен держать голосовой режим системы (глушит чужой звук).
-        /// Компонент и свойства остаются — следующий begin дешёвый.
+        /// Прогрев: инициализирует юнит заранее (без запуска захвата), чтобы
+        /// ПЕРВОЕ нажатие хоткея не платило и за инициализацию. Захват не
+        /// идёт, микрофон не горит; приглушение чужого звука держит на нуле
+        /// дакинг Min (см. build).
+        pub fn prewarm_init(&self) {
+            use std::sync::atomic::Ordering;
+            if self.initialized.load(Ordering::Acquire) {
+                return;
+            }
+            unsafe {
+                let t = std::time::Instant::now();
+                if check(ca::AudioUnitInitialize(self.unit), "initialize vpio").is_ok() {
+                    self.initialized.store(true, Ordering::Release);
+                    log::info!("vpio: прогрев-инициализация {} мс", t.elapsed().as_millis());
+                }
+            }
+        }
+
+        /// Останавливает захват. Юнит остаётся инициализированным — см.
+        /// комментарий у Engine: повторная инициализация стоила бы сотни
+        /// миллисекунд на каждом старте записи.
         pub fn end(&self) {
             unsafe {
                 ca::AudioOutputUnitStop(self.unit);
-                ca::AudioUnitUninitialize(self.unit);
                 if let Ok(mut s) = (*self.ctx).sinks.lock() {
                     *s = None;
                 }
@@ -644,6 +673,7 @@ mod vpio {
                 Ok(ctx) => Ok(Engine {
                     unit,
                     ctx,
+                    initialized: std::sync::atomic::AtomicBool::new(false),
                     input_device,
                     output_device,
                 }),
@@ -665,7 +695,13 @@ fn build_cpal_capture(
     peaks: Arc<Mutex<Vec<f32>>>,
 ) -> anyhow::Result<(ActiveCapture, u32, u16, Option<String>)> {
     let host = cpal::default_host();
-    let choice = choose_device(preferred, &input_device_names(&host));
+    // Перечисление устройств — десятки-сотни миллисекунд (с Bluetooth
+    // дороже), а нужно оно только чтобы проверить, на месте ли ЗАКРЕПЛЁННЫЙ
+    // микрофон. «System default» обходится без опроса вовсе.
+    let choice = match preferred {
+        None => DeviceChoice::SystemDefault,
+        Some(_) => choose_device(preferred, &input_device_names(&host)),
+    };
     // Named всё ещё может не открыться: между перечислением и
     // открытием устройство успевают отключить. Это тот же случай,
     // что MissingFallback, и обрабатывается так же.
@@ -732,8 +768,13 @@ fn build_vpio_capture(
     use coreaudio::audio_unit::macos_helpers::{get_default_device_id, get_device_id_from_name};
 
     // Тот же выбор устройства, что у cpal-пути: имена CoreAudio и cpal
-    // совпадают (cpal на macOS читает то же свойство устройства).
-    let choice = choose_device(preferred, &list_input_devices());
+    // совпадают (cpal на macOS читает то же свойство устройства). И так же,
+    // как там, список устройств опрашивается только ради закреплённого
+    // имени — «System default» этих миллисекунд не платит.
+    let choice = match preferred {
+        None => DeviceChoice::SystemDefault,
+        Some(_) => choose_device(preferred, &list_input_devices()),
+    };
     let named_id = match &choice {
         DeviceChoice::Named(name) => get_device_id_from_name(name),
         _ => None,
@@ -761,7 +802,12 @@ fn build_vpio_capture(
     let cached = VPIO_ENGINE.lock().unwrap().take();
     let engine = match cached {
         Some(e) if e.input_device == device_id && e.output_device == output_id => e,
-        _ => vpio::build(device_id, output_id)?,
+        _ => {
+            let t = std::time::Instant::now();
+            let e = vpio::build(device_id, output_id)?;
+            log::info!("vpio: холодная сборка графа {} мс", t.elapsed().as_millis());
+            e
+        }
     };
     if let Err(e) = engine.begin(buffer, peaks) {
         // Юнит, который не стартует, в кэш не возвращаем — пусть следующая
@@ -788,13 +834,12 @@ fn build_vpio_capture(
 pub fn prewarm_echo_cancellation(preferred: Option<String>) {
     use coreaudio::audio_unit::macos_helpers::{get_default_device_id, get_device_id_from_name};
     std::thread::spawn(move || {
-        let input_id = match &choose_device(preferred.as_deref(), &list_input_devices()) {
+        let input_id = match preferred.as_deref() {
             // Именованного может не оказаться — греем на умолчании, как
             // сделает и сама запись (fell_back_from сообщит о подмене она же).
-            DeviceChoice::Named(name) => {
-                get_device_id_from_name(name).or_else(|| get_default_device_id(true))
-            }
-            _ => get_default_device_id(true),
+            // Список устройств не опрашиваем: id ищется прямо по имени.
+            Some(name) => get_device_id_from_name(name).or_else(|| get_default_device_id(true)),
+            None => get_default_device_id(true),
         };
         let (Some(input_id), Some(output_id)) = (input_id, get_default_device_id(false)) else {
             log::warn!("прогрев эхоподавления: не нашлось устройств, пропускаем");
@@ -802,6 +847,9 @@ pub fn prewarm_echo_cancellation(preferred: Option<String>) {
         };
         match vpio::build(input_id, output_id) {
             Ok(engine) => {
+                // Инициализацию тоже платим здесь, в фоне старта приложения,
+                // а не на первом хоткее.
+                engine.prewarm_init();
                 *VPIO_ENGINE.lock().unwrap() = Some(engine);
                 log::info!("эхоподавление прогрето заранее");
             }
@@ -851,6 +899,9 @@ impl Recorder {
 
         std::thread::spawn(move || {
             let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+            // Время от нажатия до живого захвата — главная метрика задержки
+            // «хоткей → ON AIR»; в лог идёт только число.
+            let capture_t = std::time::Instant::now();
 
             #[cfg(target_os = "macos")]
             let built = if echo_cancel {
@@ -870,6 +921,7 @@ impl Recorder {
 
             let (capture, sample_rate, channels) = match built {
                 Ok((capture, sample_rate, channels, fell_back_from)) => {
+                    log::info!("захват поднят за {} мс", capture_t.elapsed().as_millis());
                     let _ = init_tx.send(Ok(fell_back_from));
                     (capture, sample_rate, channels)
                 }
