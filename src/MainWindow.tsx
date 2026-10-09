@@ -686,9 +686,13 @@ export function MainWindow() {
       // лишний риск, а не необходимость: то, что достаётся списку по Tab,
       // работает без изменений, а один лишний Arrow/Home/End перед Enter не
       // ломает сценарий из брифа ("стрелки листают, Enter подтверждает").
+      // contains, а не строгое равенство: фокус может стоять на КНОПКЕ
+      // внутри списка (tabIndex=-1 фокусируется кликом мыши) — тогда то же
+      // событие после этого обработчика дошло бы и до onKeyDown списка, и
+      // один Arrow шагал бы на два пункта.
       if (
         level.length > 0 &&
-        document.activeElement !== gridRef.current &&
+        !(gridRef.current?.contains(document.activeElement) ?? false) &&
         arrowsAvailable()
       ) {
         let moved = true
@@ -710,6 +714,10 @@ export function MainWindow() {
         }
         if (moved) {
           e.preventDefault()
+          // Событие обработано целиком здесь — ниже по дереву (onKeyDown
+          // списка, CodeMirror) его видеть не должны: второй обработчик
+          // означал бы второй шаг на то же нажатие.
+          e.stopPropagation()
           gridRef.current?.focus()
           return
         }

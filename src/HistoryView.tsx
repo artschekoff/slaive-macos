@@ -157,10 +157,14 @@ export function HistoryView({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Enter') return
-      if (document.activeElement === gridRef.current) return
+      // contains, а не строгое равенство — по той же причине, что в
+      // MainWindow: фокус на плитке ВНУТРИ сетки (клик мышью) иначе давал
+      // бы двойной шаг — здесь и в onKeyDown сетки на то же событие.
+      if (gridRef.current?.contains(document.activeElement)) return
       if (!arrowsAvailable()) return
       if (handleGridKey(e)) {
         e.preventDefault()
+        e.stopPropagation()
         gridRef.current?.focus()
       }
     }
