@@ -186,6 +186,39 @@ export const listInputDevices = () => invoke<InputDevices>('list_input_devices')
 export const startRecording = () => invoke<void>('start_recording')
 export const stopRecording = () => invoke<void>('stop_recording')
 
+/** A language the panel can force a recording to be re-read as. `'auto'` is
+ *  not a whisper language code — it is the request to detect again. */
+export type ForcedLanguage = 'auto' | Settings['language']
+
+/** Result of re-reading the already-recorded audio under a forced language. */
+export type RetranscribeResult = {
+  /** The whole transcript, not a fragment: re-transcription recomputes all of
+   *  the accumulated audio, because the whole accumulated text is what it
+   *  replaces. */
+  text: string
+  /** Display name of the language this pass ran in, or null when there is
+   *  nothing to report (see `language_report` in whisper.rs). */
+  language: string | null
+  /** The language was imposed rather than detected. False for `'auto'`,
+   *  which is a request to detect again. */
+  forced: boolean
+  durationSecs: number
+}
+
+/** Re-reads the audio that is already recorded under a language the user
+ *  picks, and returns the text instead of emitting it: the caller has to
+ *  snapshot the editor's current content for Undo before replacing it, and it
+ *  is the caller who knows when that is (see Overlay.tsx).
+ *
+ *  Rejects — leaving the panel's text untouched — when a pass is already
+ *  running, while a recording is in flight, when nothing is recorded yet, or
+ *  when whisper returns no text in that language.
+ *
+ *  One-off: the choice applies to this recording only. Recognition settings
+ *  are not written and keep being the standing preference. */
+export const retranscribe = (language: ForcedLanguage) =>
+  invoke<RetranscribeResult>('retranscribe', { language })
+
 /** PCM последней завершённой записи (16 кГц моно) для воспроизведения через WebAudio. */
 export const getLastRecording = () => invoke<number[] | null>('get_last_recording')
 

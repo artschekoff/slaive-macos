@@ -26,6 +26,52 @@ const AI_KEYCHAIN_SERVICE: &str = "net.slaive.app";
 /// 20 кадров в секунду — с запасом для дорожки, панель не захлебнётся.
 const LEVEL_EMIT_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Модель занята: предыдущая расшифровка (обычная или повторная) ещё идёт.
+/// Состояние временное и ожидаемое, поэтому текст просит подождать, а не
+/// сообщает о поломке.
+const TRANSCRIBER_BUSY_MESSAGE: &str =
+    "Still transcribing. Wait a moment and try again.";
+/// Мьютекс транскрибера отравлен: паника внутри whisper.cpp. Не временное
+/// состояние — без перезапуска расшифровки больше не будет.
+const TRANSCRIBER_POISONED_MESSAGE: &str =
+    "The previous transcription crashed. Restart Slaive.";
+
+/// Что ответить, когда блокировка транскрибера не досталась.
+///
+/// Вынесено из места взятия блокировки ровно для того, чтобы решение
+/// поддавалось тесту: `Transcriber` без файла модели не собрать, а
+/// `try_lock` на настоящем состоянии приложения в юнит-тесте не
+/// воспроизвести — само же решение «занято или сломано» от содержимого
+/// мьютекса не зависит вовсе.
+fn busy_reason<T>(err: std::sync::TryLockError<T>) -> &'static str {
+    match err {
+        std::sync::TryLockError::WouldBlock => TRANSCRIBER_BUSY_MESSAGE,
+        std::sync::TryLockError::Poisoned(_) => TRANSCRIBER_POISONED_MESSAGE,
+    }
+}
+
+/// Готовит сырую запись к подаче в whisper — единственное место, где это
+/// делается, и оно общее для первого прохода (`end_recording`) и для
+/// повторного под принудительным языком (`retranscribe`).
+///
+/// Общее оно не из экономии трёх строк: в `last_recording` лежит СЫРОЙ звук
+/// (см. `end_recording`), а whisper в первый проход получил его после среза
+/// гула и усиления. Повторный проход обязан подать модели ровно то же самое —
+/// иначе результат разойдётся с первым по причинам, не имеющим отношения к
+/// языку, а именно их фича и призвана развести.
+///
+/// Порядок: сперва срез гула, потом усиление — иначе усиление тратило бы
+/// запас громкости (и потолок клиппинга) на гул, который всё равно будет
+/// отрезан.
+fn prepare_for_whisper(pcm: &[f32], high_pass: bool, mic_gain: f32) -> Vec<f32> {
+    let filtered = if high_pass {
+        audio::high_pass(pcm, audio::WHISPER_SAMPLE_RATE, audio::HIGH_PASS_CUTOFF_HZ)
+    } else {
+        pcm.to_vec()
+    };
+    audio::apply_gain(&filtered, mic_gain)
+}
+
 /// Тексты отказов в правах — общие для двух путей в `paste_text`:
 /// превентивной проверки перед попыткой вставки и разбора сообщения
 /// osascript после её неудачи (право могут отозвать между ними).
@@ -939,6 +985,12 @@ pub struct TranscriptPayload {
     /// звука, а не последнего фрагмента: в историю уйдёт накопленный текст, и
     /// число рядом с ним должно относиться к тому же.
     pub duration_secs: f32,
+    /// Язык, на котором whisper вёл эту расшифровку, человекочитаемым именем
+    /// — или `None`, когда показывать нечего (язык приколот в настройках, см.
+    /// `whisper::language_report`). Поле едет вместе с текстом, а не
+    /// отдельным событием: иначе панель могла бы показать язык от одной
+    /// расшифровки рядом с текстом от другой.
+    pub language: Option<String>,
 }
 
 /// Общая логика остановки записи и запуска расшифровки в фоновом потоке.
@@ -1012,20 +1064,14 @@ pub fn end_recording(app: &AppHandle) {
         // личные данные пользователя, как и сама расшифровка.
         let initial_prompt = crate::whisper::initial_prompt(&dictionary);
 
-        // Фильтр и усиление применяются здесь и только здесь — к копии PCM,
-        // которая уходит в VAD и whisper (`transcribe` получает уже
-        // обработанное). Ни дорожка уровня, ни `Play` их не видят: дорожка
-        // рисуется из пиков, посчитанных в колбэке микрофона внутри
-        // `audio::Recorder`, а в `last_recording` ниже кладётся сырая запись.
-        // Порядок: сперва срез гула, потом усиление — иначе усиление тратило
-        // бы запас громкости (и потолок клиппинга) на гул, который всё равно
-        // будет отрезан.
-        let filtered = if high_pass {
-            audio::high_pass(&pcm, audio::WHISPER_SAMPLE_RATE, audio::HIGH_PASS_CUTOFF_HZ)
-        } else {
-            pcm.clone()
-        };
-        let boosted = audio::apply_gain(&filtered, mic_gain);
+        // Фильтр и усиление применяются к копии PCM, которая уходит в VAD и
+        // whisper (`transcribe` получает уже обработанное). Ни дорожка
+        // уровня, ни `Play` их не видят: дорожка рисуется из пиков,
+        // посчитанных в колбэке микрофона внутри `audio::Recorder`, а в
+        // `last_recording` ниже кладётся сырая запись. Та же подготовка, тем
+        // же вызовом, идёт и в повторную расшифровку — см.
+        // `prepare_for_whisper`, почему это обязано быть одно место.
+        let boosted = prepare_for_whisper(&pcm, high_pass, mic_gain);
         let boosted_peak = audio::peak_amplitude(&boosted);
         // Оба пика в лог — так видно, работает ли настройка. Оба числа,
         // содержимое речи по-прежнему не логируется.
@@ -1110,11 +1156,19 @@ pub fn end_recording(app: &AppHandle) {
         drop(slot);
 
         match result {
-            Ok(text) if text.is_empty() => {
+            Ok(out) if out.text.is_empty() => {
                 emit_error(&app, "Nothing was transcribed. Try again and speak clearly.");
                 focus_overlay(&app);
             }
-            Ok(text) => {
+            Ok(out) => {
+                // Язык этого прохода. В лог — только идентификатор и имя:
+                // это свойство расшифровки, а не её содержимое.
+                let report = crate::whisper::language_report(&language, None, out.lang_id);
+                log::info!(
+                    "язык расшифровки: настройка {language}, id {}, показываем {:?}",
+                    out.lang_id,
+                    report.name
+                );
                 // Фокус берём СРАЗУ ПОСЛЕ эмиссии transcript, в этом же потоке
                 // и в этом же порядке — гарантирует, что к моменту, когда
                 // фронтенд получит событие и оживит Enter/Cmd+C, окно уже
@@ -1131,9 +1185,10 @@ pub fn end_recording(app: &AppHandle) {
                     "overlay",
                     "transcript",
                     TranscriptPayload {
-                        text,
+                        text: out.text,
                         append,
                         duration_secs,
+                        language: report.name,
                     },
                 );
                 focus_overlay(&app);
@@ -1158,6 +1213,160 @@ pub fn start_recording(app: AppHandle) {
 #[tauri::command]
 pub fn stop_recording(app: AppHandle) {
     end_recording(&app);
+}
+
+/// Повторная расшифровка уже записанного звука под другим языком.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RetranscribeResult {
+    /// Текст целиком — не фрагмент: пересчитывается ВСЯ накопленная запись,
+    /// и дозаписывать тут не к чему. Панель заменяет им документ, сохранив
+    /// прежний текст под Undo (см. Overlay.tsx).
+    pub text: String,
+    /// Имя языка для показа (см. `whisper::language_report`).
+    pub language: Option<String>,
+    /// Язык был назначен принудительно, а не определён. `false`, когда
+    /// пользователь выбрал «Auto-detect»: это просьба определить заново.
+    pub forced: bool,
+    /// Длительность пересчитанного звука — чтобы запись журнала осталась
+    /// согласованной с текстом, который в неё ляжет.
+    pub duration_secs: f32,
+}
+
+/// Расшифровать УЖЕ ЗАПИСАННЫЙ звук заново, с принудительно заданным языком.
+///
+/// Зачем. Определение языка иногда ошибается, и тогда текст выходит
+/// бессмысленным целиком — но звук при этом записан нормально, и
+/// переговаривать абзац заново только из-за языка незачем.
+///
+/// Звук берётся из `last_recording` — той же сырой записи, которую играет
+/// `Play`, и готовится к подаче в whisper тем же `prepare_for_whisper`, что и
+/// в первый проход. Два следствия, которые стоит знать:
+///
+///  - при дозаписи пересчитывается ВСЯ накопленная запись, тогда как первый
+///    проход видел только последний фрагмент. Это не баг: в редакторе лежит
+///    накопленный текст, и заменять его можно только таким же накопленным;
+///  - усиление и срез гула читаются из НАСТРОЕК НА ЭТОТ МОМЕНТ. Поменяй их
+///    между записью и повтором — сигнал будет другим. Запоминать параметры
+///    записи ради этого края не стоит: настройки распознавания так и
+///    задуманы «применяются к следующей расшифровке».
+///
+/// `language` — код из таблицы whisper.cpp ("ru", "en", ...) или "auto" для
+/// повторного определения. Настройки при этом НЕ меняются: это разовое
+/// переопределение на эту запись, а стоящее предпочтение остаётся в
+/// Recognition settings.
+///
+/// Асинхронная команда со `spawn_blocking` — по той же причине, что и
+/// `count_prompt_tokens`: синхронная команда Tauri идёт на главном потоке, а
+/// здесь работы на секунды.
+#[tauri::command]
+pub async fn retranscribe(app: AppHandle, language: String) -> Result<RetranscribeResult, String> {
+    // Код языка проверяем ДО всякой работы: пришёл он из интерфейса, но
+    // граница команды — не то место, где можно верить вызывающему.
+    if !crate::whisper::is_known_language(&language) {
+        log::warn!("повтор: неизвестный код языка, отказ");
+        return Err("That language isn't supported.".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+
+        // Запись идёт прямо сейчас — пересчитывать нечего: звук ещё не
+        // дописан, а когда допишется, его собственная расшифровка всё равно
+        // перетёрла бы наш результат.
+        if state.recorder.lock().unwrap().is_some() {
+            return Err("Recording in progress. Stop it first.".to_string());
+        }
+
+        let Some(pcm) = state.last_recording.lock().unwrap().clone() else {
+            return Err("Nothing recorded yet.".to_string());
+        };
+        if pcm.len() < MIN_SAMPLES {
+            return Err("The recording is too short to transcribe.".to_string());
+        }
+
+        let (model_path, setting, vad_model_path, mic_gain, vad_threshold, dictionary, high_pass) = {
+            let s = state.settings.lock().unwrap();
+            (
+                s.model_path.clone(),
+                s.language.clone(),
+                s.vad_model_path.clone(),
+                s.mic_gain,
+                s.vad_threshold,
+                s.dictionary.clone(),
+                s.high_pass_filter,
+            )
+        };
+        let Some(model_path) = model_path else {
+            return Err("No model selected. Open Settings and download one.".to_string());
+        };
+        // Тот же признак «модель занята», что и у `begin_recording`, и той же
+        // формы: занятая блокировка И ЕСТЬ идущая расшифровка, поэтому вторая
+        // поверх первой не начинается — она отказывает. Отказ, а не очередь:
+        // человек нажал бы ещё раз, не дождавшись, и получил бы два прохода
+        // по одному звуку, второй из которых перетёр бы первый.
+        //
+        // Блокировка берётся ДО подготовки звука, а не после: пока её нет,
+        // `begin_recording` считает модель свободной и пустит новую запись —
+        // и чем дольше мы готовим десять минут аудио без блокировки, тем шире
+        // это окно. Заодно на отказе не тратится работа, которая никому не
+        // понадобится.
+        let mut slot = state.transcriber.try_lock().map_err(|e| {
+            log::warn!("повтор: транскрибер занят, отказ");
+            busy_reason(e).to_string()
+        })?;
+        if slot.is_none() {
+            match Transcriber::load(&model_path) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    log::error!("повтор: модель whisper не загрузилась: {e:?}");
+                    return Err(e.to_string());
+                }
+            }
+        }
+        let initial_prompt = crate::whisper::initial_prompt(&dictionary);
+        let boosted = prepare_for_whisper(&pcm, high_pass, mic_gain);
+        let duration_secs = pcm.len() as f32 / audio::WHISPER_SAMPLE_RATE as f32;
+        log::info!(
+            "повтор: сэмплов {}, принудительный язык {language}, настройка {setting}",
+            pcm.len()
+        );
+        let out = slot
+            .as_ref()
+            .unwrap()
+            .transcribe(
+                &boosted,
+                &language,
+                vad_model_path.as_deref(),
+                vad_threshold,
+                initial_prompt.as_deref(),
+            )
+            .map_err(|e| {
+                log::error!("повтор: расшифровка не удалась: {e:?}");
+                e.to_string()
+            })?;
+        drop(slot);
+
+        // Пустой результат — отказ, а не успех с пустой строкой: панель
+        // обязана оставить прежний текст на месте, а не заменить его ничем.
+        if out.text.is_empty() {
+            return Err("Nothing was transcribed in that language.".to_string());
+        }
+        let report = crate::whisper::language_report(&setting, Some(&language), out.lang_id);
+        log::info!(
+            "повтор: id языка {}, показываем {:?}, принудительно {}",
+            out.lang_id,
+            report.name,
+            report.forced
+        );
+        Ok(RetranscribeResult {
+            text: out.text,
+            language: report.name,
+            forced: report.forced,
+            duration_secs,
+        })
+    })
+    .await
+    .map_err(|e| format!("Couldn't re-transcribe the recording: {e}."))?
 }
 
 /// Строка VAD в разделе Models: тот же артефакт, что и модели транскрипции,
@@ -2139,6 +2348,53 @@ mod tests {
         const OWN: i32 = 777;
         assert_eq!(capture_source_pid(Some(42), Some(OWN), OWN, true), Some(42));
         assert_eq!(capture_source_pid(None, Some(OWN), OWN, true), None);
+    }
+
+    /// Вторая повторная расшифровка поверх первой не начинается: занятая
+    /// блокировка транскрибера — это и есть «проход уже идёт», и ответ на неё
+    /// отказ, а не очередь. Мьютекс здесь обычный, не транскриберный:
+    /// проверяется решение, а не содержимое — ровно за этим `busy_reason` и
+    /// вынесена отдельно (см. её комментарий).
+    #[test]
+    fn a_second_pass_is_refused_while_the_first_holds_the_lock() {
+        let lock = std::sync::Mutex::new(0);
+        let held = lock.lock().unwrap();
+        let err = lock.try_lock().expect_err("блокировка занята");
+        assert_eq!(busy_reason(err), TRANSCRIBER_BUSY_MESSAGE);
+        drop(held);
+        // Отпустили — следующая попытка проходит.
+        assert!(lock.try_lock().is_ok());
+    }
+
+    /// Отравленный мьютекс — другое состояние и другой ответ: перезапуск, а
+    /// не «подождите». Сказать «подождите» на мёртвой модели значило бы
+    /// обещать то, чего уже не будет.
+    #[test]
+    fn a_poisoned_transcriber_asks_for_a_restart_not_for_patience() {
+        let lock = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let clone = lock.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = clone.lock().unwrap();
+            panic!("имитируем панику внутри расшифровки");
+        })
+        .join();
+        let err = lock.try_lock().expect_err("мьютекс отравлен");
+        assert_eq!(busy_reason(err), TRANSCRIBER_POISONED_MESSAGE);
+    }
+
+    /// Подготовка звука для whisper — одна на первый проход и на повторный.
+    /// Тест держит именно это: усиление применяется, а при выключенном
+    /// фильтре сигнал отличается от исходного ровно на множитель.
+    #[test]
+    fn preparation_applies_gain_and_is_the_same_for_both_passes() {
+        let pcm = vec![0.1_f32, -0.2, 0.3];
+        let plain = prepare_for_whisper(&pcm, false, 2.0);
+        assert_eq!(plain.len(), pcm.len());
+        for (out, src) in plain.iter().zip(pcm.iter()) {
+            assert!((out - src * 2.0).abs() < 1e-6, "ожидали усиление вдвое");
+        }
+        // Усиление 1.0 без фильтра не меняет сигнал вовсе.
+        assert_eq!(prepare_for_whisper(&pcm, false, 1.0), pcm);
     }
 
     #[test]

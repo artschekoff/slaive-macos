@@ -14,6 +14,99 @@ pub struct Transcriber {
     ctx: WhisperContext,
 }
 
+/// Результат одного прохода whisper: текст и язык, на котором модель этот
+/// текст получила.
+///
+/// Язык отдаётся идентификатором таблицы whisper.cpp, а не именем: имя —
+/// дело показа (см. `language_name`), а число — то, что реально вернул
+/// движок. Хранить его числом ещё и дешевле: никаких аллокаций на каждую
+/// расшифровку.
+pub struct Transcription {
+    pub text: String,
+    /// Идентификатор языка из таблицы whisper.cpp. При `language = "auto"`
+    /// это язык, который модель ОПРЕДЕЛИЛА сама; при заданном языке — он же
+    /// и есть. -1 (или любое незнакомое число) означает «язык неизвестен» —
+    /// `language_name` вернёт на него `None`, а не выдумает имя.
+    pub lang_id: i32,
+}
+
+/// Человекочитаемое имя языка по идентификатору whisper.cpp: 1 → `Russian`.
+///
+/// whisper.cpp держит имена в нижнем регистре (`russian`), а показываем мы их
+/// в строке интерфейса рядом с остальным английским текстом — поэтому первая
+/// буква поднимается здесь, один раз, а не в каждом месте показа. ASCII-only
+/// `to_ascii_uppercase` достаточно: таблица имён в whisper.cpp вся латиницей.
+pub fn language_name(id: i32) -> Option<String> {
+    let raw = whisper_rs::get_lang_str_full(id)?;
+    let mut chars = raw.chars();
+    let first = chars.next()?;
+    Some(first.to_uppercase().collect::<String>() + chars.as_str())
+}
+
+/// Знает ли whisper такой код языка. `"auto"` — не код языка, а наш
+/// собственный режим «определяй сам» (см. `transcribe`), поэтому он
+/// пропускается отдельной веткой, а не через таблицу whisper.cpp.
+///
+/// NUL проверяется ДО обращения к whisper-rs: `get_lang_id` строит `CString`
+/// и на нуле внутри строки паникует (whisper-rs 0.16) — та же ловушка, что у
+/// `set_initial_prompt`, и закрывается так же.
+pub fn is_known_language(lang: &str) -> bool {
+    if lang.contains('\0') {
+        return false;
+    }
+    lang == "auto" || whisper_rs::get_lang_id(lang).is_some()
+}
+
+/// Что панель скажет про язык этой расшифровки.
+pub struct LanguageReport {
+    /// Имя языка для показа — `None`, когда показывать нечего (см.
+    /// `language_report`).
+    pub name: Option<String>,
+    /// Язык был задан принудительно НА ЭТУ запись, а не определён моделью.
+    /// Панель рисует такой ярлык иначе: это разовое переопределение, а не
+    /// то, что стоит в настройках.
+    pub forced: bool,
+}
+
+/// Решает, что показать про язык, по трём входам: что стоит в настройках
+/// распознавания, что пользователь выбрал принудительно на эту конкретную
+/// запись и что whisper вернул по факту.
+///
+/// Правила, и почему они такие:
+///
+///  - принудительный выбор конкретного языка — это и есть новость: модель
+///    работала не на том, на чём работала бы сама, и человек должен видеть,
+///    на чём именно. Имя берётся из ВЫБОРА, а не из `lang_id`: это ровно то,
+///    что было приказано, и расхождение между приказом и показом было бы
+///    враньём даже при совпадении значений;
+///  - принудительное `"auto"` — это не принуждение, а просьба определить
+///    заново, поэтому ведёт себя как обычный авторежим и `forced` не ставит;
+///  - авторежим без вмешательства — показываем, что модель определила: это
+///    единственный случай, где число реально несёт информацию;
+///  - язык приколот в настройках и никто его не переопределял — показывать
+///    нечего: whisper не определял язык, ему его назвали, и повторять
+///    человеку его же настройку значило бы занимать место панели шумом.
+pub fn language_report(setting: &str, forced: Option<&str>, lang_id: i32) -> LanguageReport {
+    match forced {
+        Some(lang) if lang != "auto" => LanguageReport {
+            name: whisper_rs::get_lang_id(lang).and_then(language_name),
+            forced: true,
+        },
+        Some(_) => LanguageReport {
+            name: language_name(lang_id),
+            forced: false,
+        },
+        None if setting == "auto" => LanguageReport {
+            name: language_name(lang_id),
+            forced: false,
+        },
+        None => LanguageReport {
+            name: None,
+            forced: false,
+        },
+    }
+}
+
 pub fn join_segments(segments: &[String]) -> String {
     segments
         .iter()
@@ -130,6 +223,10 @@ impl Transcriber {
     /// VAD включён; вне диапазона зажимается (см. `settings`).
     /// `initial_prompt` — уже собранная затравка из словаря терминов (см.
     /// `initial_prompt`); `None` означает, что параметр не передаётся вовсе.
+    ///
+    /// Возвращает текст ВМЕСТЕ с языком этого прохода (см. `Transcription`):
+    /// язык читается из состояния сразу после `full()`, это поле результата
+    /// уже выполненного прохода, а не второй проход по аудио.
     pub fn transcribe(
         &self,
         pcm: &[f32],
@@ -137,7 +234,7 @@ impl Transcriber {
         vad_model_path: Option<&Path>,
         vad_threshold: f32,
         initial_prompt: Option<&str>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<Transcription> {
         if pcm.len() < MIN_SAMPLES {
             return Err(anyhow!("Recording too short — hold the hotkey and speak longer."));
         }
@@ -241,6 +338,12 @@ impl Transcriber {
             .full(params, pcm)
             .context("Couldn't transcribe the recording.")?;
 
+        // Язык этого прохода. Читается ИЗ СОСТОЯНИЯ и только после full():
+        // whisper.cpp заполняет это поле по ходу уже выполняемой расшифровки,
+        // так что повторно гонять аудио не нужно. При language = "auto" здесь
+        // лежит то, что модель определила сама; при заданном языке — он же.
+        let lang_id = state.full_lang_id_from_state();
+
         // В 0.16 full_n_segments() возвращает голый c_int, а не Result — это
         // изменилось при апгрейде с 0.14.
         let n = state.full_n_segments();
@@ -262,7 +365,10 @@ impl Transcriber {
                 .unwrap_or_default();
             segments.push(text);
         }
-        Ok(join_segments(&segments))
+        Ok(Transcription {
+            text: join_segments(&segments),
+            lang_id,
+        })
     }
 }
 
@@ -342,6 +448,86 @@ mod tests {
         let prompt = initial_prompt("Rea\0ct\nTauri").unwrap();
         assert!(!prompt.contains('\0'));
         assert_eq!(prompt, "React, Tauri");
+    }
+
+    /// Идентификатор ↔ имя — в обе стороны и на РЕАЛЬНОЙ таблице whisper.cpp.
+    /// Модель для этого не нужна: таблица языков статична и живёт в самой
+    /// библиотеке, а не в весах, поэтому единственное отображение, на котором
+    /// держится вся фича, проверяется обычным `cargo test`.
+    #[test]
+    fn language_ids_round_trip_through_their_names() {
+        for (code, name) in [("ru", "Russian"), ("en", "English"), ("de", "German")] {
+            let id = whisper_rs::get_lang_id(code).expect("whisper знает этот код");
+            assert_eq!(language_name(id).as_deref(), Some(name));
+        }
+    }
+
+    /// Незнакомый идентификатор не превращается в выдуманное имя: -1 whisper
+    /// отдаёт сам, когда язык определить не удалось.
+    #[test]
+    fn unknown_language_id_has_no_name() {
+        assert_eq!(language_name(-1), None);
+        assert_eq!(language_name(i32::MAX), None);
+    }
+
+    /// Принудительный выбор приходит из интерфейса, но пройти должен только
+    /// то, что whisper действительно понимает. NUL — отдельная ловушка:
+    /// `get_lang_id` на нём паникует внутри CString.
+    #[test]
+    fn only_languages_whisper_knows_are_accepted() {
+        assert!(is_known_language("ru"));
+        assert!(is_known_language("en"));
+        // "auto" — наш режим, а не код языка в таблице whisper.cpp.
+        assert!(is_known_language("auto"));
+        assert!(!is_known_language("klingon"));
+        assert!(!is_known_language(""));
+        assert!(!is_known_language("r\0u"));
+    }
+
+    /// Авторежим — язык определила модель, и это единственное, что здесь
+    /// несёт информацию.
+    #[test]
+    fn auto_mode_reports_what_the_model_detected() {
+        let ru = whisper_rs::get_lang_id("ru").unwrap();
+        let r = language_report("auto", None, ru);
+        assert_eq!(r.name.as_deref(), Some("Russian"));
+        assert!(!r.forced);
+    }
+
+    /// Язык приколот в настройках — whisper его не определял, ему его
+    /// назвали, и сообщать нечего.
+    #[test]
+    fn pinned_language_reports_nothing() {
+        let ru = whisper_rs::get_lang_id("ru").unwrap();
+        assert!(language_report("ru", None, ru).name.is_none());
+        assert!(language_report("en", None, ru).name.is_none());
+    }
+
+    /// Принуждение показывается ИМЕНЕМ ВЫБОРА и помечается как разовое — даже
+    /// если настройка приколота на другое.
+    #[test]
+    fn forced_language_is_reported_as_forced() {
+        let ru = whisper_rs::get_lang_id("ru").unwrap();
+        let r = language_report("ru", Some("en"), ru);
+        assert_eq!(r.name.as_deref(), Some("English"));
+        assert!(r.forced);
+    }
+
+    /// Принудительное "auto" — просьба определить заново, а не принуждение:
+    /// показываем определённое и НЕ ставим метку разового выбора.
+    #[test]
+    fn forced_auto_behaves_like_detection() {
+        let en = whisper_rs::get_lang_id("en").unwrap();
+        let r = language_report("ru", Some("auto"), en);
+        assert_eq!(r.name.as_deref(), Some("English"));
+        assert!(!r.forced);
+    }
+
+    /// Модель не смогла определить язык — в авторежиме показывать нечего, и
+    /// выдумывать имя для -1 тоже нельзя.
+    #[test]
+    fn undetected_language_in_auto_mode_reports_nothing() {
+        assert!(language_report("auto", None, -1).name.is_none());
     }
 
     #[test]
@@ -468,8 +654,12 @@ whisper отбросит начало списка молча"
         let t = Transcriber::load(std::path::Path::new(&path)).unwrap();
         // Тишина: модель должна отработать без паники и вернуть строку.
         let silence = vec![0.0_f32; 16_000 * 2];
-        let text = t.transcribe(&silence, "ru", None, 0.5, None).unwrap();
-        println!("на тишине получили: {text:?}");
+        let out = t.transcribe(&silence, "ru", None, 0.5, None).unwrap();
+        println!(
+            "на тишине получили: {:?}, язык {:?}",
+            out.text,
+            language_name(out.lang_id)
+        );
     }
 
     /// Регрессия на баг с `set_detect_language`: при языке "auto" full()
@@ -495,8 +685,12 @@ whisper отбросит начало списка молча"
             })
             .collect();
 
-        let text = t.transcribe(&tone, "auto", None, 0.5, None).unwrap();
-        println!("на тоне 440 Гц с language=auto получили: {text:?}");
+        let out = t.transcribe(&tone, "auto", None, 0.5, None).unwrap();
+        println!(
+            "на тоне 440 Гц с language=auto получили: {:?}, язык {:?}",
+            out.text,
+            language_name(out.lang_id)
+        );
         // Основная регрессия, которую мы ловим: раньше это возвращало Ok("")
         // из-за detect_language, не дойдя до транскрипции вообще. transcribe
         // должен как минимум успешно завершиться, не упав в пустую строку
@@ -545,9 +739,13 @@ whisper отбросит начало списка молча"
         pcm.extend_from_slice(&tone);
         pcm.extend_from_slice(&silence);
 
-        let text = t
+        let out = t
             .transcribe(&pcm, "auto", Some(vad_path.as_path()), 0.5, None)
             .unwrap();
-        println!("VAD включён ({}): получили {text:?}", vad_path.display());
+        println!(
+            "VAD включён ({}): получили {:?}",
+            vad_path.display(),
+            out.text
+        );
     }
 }

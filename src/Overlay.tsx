@@ -15,9 +15,11 @@ import {
   openPrivacyPane,
   openSettingsWindow,
   pasteText,
+  retranscribe,
   setOverlayHasText,
   startRecording,
   stopRecording,
+  type ForcedLanguage,
   type PrivacyPane,
   type Settings,
 } from './api'
@@ -152,9 +154,35 @@ type RecStartPayload = { append: boolean }
 // пересылает дальше в журнал расшифровок (см. addHistoryEntry ниже). При
 // дозаписи это длительность ВСЕГО накопленного звука, а не последнего
 // фрагмента.
-type TranscriptPayload = { text: string; append: boolean; durationSecs: number }
+// language — имя языка этого прохода, или null, когда показывать нечего (язык
+// приколот в настройках, см. language_report в whisper.rs).
+type TranscriptPayload = {
+  text: string
+  append: boolean
+  durationSecs: number
+  language: string | null
+}
 // icon — уже готовый data: URL или null (нет иконки/не удалось сконвертировать).
 type SourceAppPayload = { name: string; icon: string | null }
+
+// Что предлагает принудительный выбор языка. whisper знает около сотни
+// языков, но список из сотни в этой панели нечитаем, а главное — не нужен:
+// Recognition settings УЖЕ решили, какие языки у этого пользователя бывают
+// ('auto' | 'ru' | 'en', см. Settings.tsx), и второй, более широкий список
+// здесь был бы вторым источником правды о том же. Подписи повторяют подписи
+// настроек, кроме первой: там это предпочтение («Detect automatically»),
+// здесь — разовое действие над уже записанным звуком.
+const FORCED_LANGUAGES: { value: ForcedLanguage; label: string }[] = [
+  { value: 'auto', label: 'Detect again' },
+  { value: 'ru', label: 'Russian' },
+  { value: 'en', label: 'English' },
+]
+
+// Подпись строки с Undo — та же роль и тот же приём, что у HISTORY_NOTICE/
+// NEW_TEXT_NOTICE в главном окне (см. MainWindow.tsx): замена задумана, но
+// «задумано» не оправдывает молчаливую потерю правок, которые человек внёс
+// руками. Объясняем ровно одно — откуда взялся текст, который теперь в поле.
+const RETRANSCRIBE_NOTICE = 'Re-transcribed. The text that was here has been replaced.'
 
 export function Overlay() {
   const [phase, setPhase] = useState<Phase>('idle')
@@ -207,6 +235,34 @@ export function Overlay() {
   // «записи пока нет» (сессия только началась или прошлая запись сорвалась).
   // Ref, а не state: значение нужно только внутри обработчика и не рисуется.
   const historyWriteRef = useRef<Promise<number | null>>(Promise.resolve(null))
+  // Язык этой расшифровки: имя для показа и признак «назначен принудительно,
+  // а не определён». null — показывать нечего: язык приколот в настройках
+  // (whisper его не определял, ему его назвали — см. language_report в
+  // whisper.rs) или расшифровки ещё не было.
+  const [language, setLanguage] = useState<{ name: string; forced: boolean } | null>(null)
+  // Идёт повторная расшифровка. Второй отказывает сам бэкенд (занятая
+  // блокировка транскрибера, см. retranscribe), но ждать круга до отказа,
+  // чтобы выключить селектор, незачем — он выключается сразу.
+  const [retranscribing, setRetranscribing] = useState(false)
+  // Что лежало в редакторе ДО повторной расшифровки — ровно тот же приём и та
+  // же гарантия, что у `replaced` в главном окне (см. MainWindow.tsx):
+  // замена происходит сразу, а рядом остаётся строка с кнопкой Undo, которая
+  // кладёт прежний текст обратно побайтово. Спрашивать подтверждение ПЕРЕД
+  // заменой нельзя: человек нажал «Redo as», замена и есть то, что он
+  // попросил, и диалог поверх неё был бы вопросом «ты уверен?» на явное
+  // действие. Но в Vim-режиме правка надиктованного руками — основной
+  // сценарий, и терять её молча недопустимо.
+  //
+  // Не полагаемся на undo самого редактора (vim `u`): про него надо знать, он
+  // требует normal-режима и фокуса в поле. Собственный снимок работает по
+  // построению.
+  const [replaced, setReplaced] = useState<string | null>(null)
+  // Повторная расшифровка не удалась. ОТДЕЛЬНО от `error`/phase: текст в поле
+  // цел, Paste и Copy работают, и фаза ошибки тут соврала бы — а главное,
+  // увела бы селектор с экрана вместе со строкой языка, и повторить попытку
+  // стало бы нечем. Потеря транскрипта из-за неудачной повторной попытки
+  // хуже, чем неверный язык.
+  const [retranscribeError, setRetranscribeError] = useState('')
   const [permissionPane, setPermissionPane] = useState<PrivacyPane | null>(null)
   // Модальный слой "нет права на вставку" — показывается СРАЗУ по нажатию
   // Paste, если право уже отсутствует (см. onPaste), а не после круга
@@ -423,6 +479,16 @@ export function Overlay() {
         // `rec:start`, см. begin_recording).
         setDeviceNotice('')
         setPermissionPane(null)
+        // Язык — свойство РАСШИФРОВКИ, а не сессии: новая запись принесёт
+        // свой, и ярлык от прошлой висеть над ней не должен. Это же и делает
+        // принудительный выбор разовым по построению, а не по договорённости:
+        // следующая запись снова идёт по настройке, а ярлык «Forced» гаснет.
+        setLanguage(null)
+        // Снимок для Undo относится к документу, которого больше нет (при
+        // новой записи поле очищается, при дозаписи — меняется), поэтому
+        // предложение вернуть его теряет смысл вместе с началом записи.
+        setReplaced(null)
+        setRetranscribeError('')
         // PCM всегда перечитываем заново: при дозаписи бэкенд склеил новый
         // фрагмент с прежним, и закэшированная тут копия устарела ровно так
         // же, как при обычной записи.
@@ -538,6 +604,11 @@ export function Overlay() {
           // выделения — самый безопасный вариант.
           view.focus()
         }
+        // Язык едет тем же событием, что и текст (см. TranscriptPayload в
+        // commands.rs): показать язык одной расшифровки рядом с текстом
+        // другой невозможно структурно. Здесь он всегда определённый, не
+        // принудительный — принуждение бывает только через retranscribe.
+        setLanguage(e.payload.language ? { name: e.payload.language, forced: false } : null)
         setPhase('ready')
       }),
       listen<string>('rec:device-fallback', (e) => {
@@ -691,6 +762,81 @@ export function Overlay() {
         setPhase('error')
         setPermissionPane(null)
       })
+  }
+
+  // Повторная расшифровка УЖЕ ЗАПИСАННОГО звука под выбранным языком.
+  // Определение языка иногда ошибается, и тогда текст бессмыслен целиком —
+  // но звук записан нормально, и переговаривать абзац заново незачем.
+  //
+  // Звук, дорожка уровня и Play при этом не трогаются вообще: пересчитывается
+  // только текст (бэкенд читает ту же сырую запись из last_recording, которую
+  // играет Play, и ничего в неё не пишет — см. retranscribe в commands.rs).
+  const onForceLanguage = (lang: ForcedLanguage) => {
+    // Второй проход поверх первого отказывает и сам бэкенд, но дать нажать
+    // второй раз и ответить отказом — хуже, чем не дать нажать.
+    if (retranscribing) return
+    // Снимок делается ЗДЕСЬ, в момент нажатия, а не в момент прихода
+    // результата: между ними секунды, и поле за это время могли править.
+    // Вернуть надо именно то, что человек видел, когда просил повтор.
+    const previous = viewRef.current?.state.doc.toString() ?? ''
+    setRetranscribing(true)
+    setRetranscribeError('')
+    // Работа видна той же строкой статуса, что и у первого прохода
+    // («Transcribing…»): это ровно то же самое событие для пользователя, и
+    // второй словарь состояний панели ради него не нужен.
+    setPhase('transcribing')
+    retranscribe(lang)
+      .then((res) => {
+        const view = viewRef.current
+        // Замена ЦЕЛИКОМ, а не вставка: пересчитан весь накопленный звук, и
+        // приклеивать такой текст к старому означало бы показать сказанное
+        // дважды. Прежнее содержимое уходит под Undo строкой ниже.
+        if (view) resetEditorContent(view, res.text)
+        setLanguage(res.language ? { name: res.language, forced: res.forced } : null)
+        // Пустое (или пробельное) прежнее содержимое возвращать незачем —
+        // тот же порог, что в главном окне.
+        setReplaced(previous.trim() ? previous : null)
+        if (view) view.focus()
+        // Журнал: плитка этой сессии должна держать ИСПРАВЛЕННЫЙ текст, а не
+        // бессмысленный от неверного языка — иначе починка языка живёт только
+        // до закрытия панели. Растим ту же запись, что и дозаписи (одна
+        // сессия — одна плитка, см. обработчик transcript выше); id ещё нет,
+        // только если первая запись в журнал сорвалась.
+        historyWriteRef.current = historyWriteRef.current
+          .then((entryId) =>
+            entryId !== null
+              ? updateHistoryEntry(entryId, res.text, res.durationSecs)
+              : addHistoryEntry(res.text, res.durationSecs)
+          )
+          .catch((err) => {
+            console.error('история: повторная расшифровка не сохранена:', String(err))
+            return null
+          })
+      })
+      .catch((e) => {
+        // Текст в поле не тронут: его заменяет только ветка успеха выше.
+        setRetranscribeError(String(e))
+      })
+      .finally(() => {
+        setRetranscribing(false)
+        // Фазу возвращаем ТОЛЬКО если она всё ещё наша. За эти секунды могла
+        // прийти ошибка или начаться новая запись (хоткей успевает проскочить
+        // в узкое окно до того, как бэкенд займёт модель) — затирать чужую
+        // фазу своим «готово» значило бы соврать о состоянии панели.
+        setPhase((p) => (p === 'transcribing' ? 'ready' : p))
+      })
+  }
+
+  // Возврат текста, который заменила повторная расшифровка — побайтово, из
+  // снимка. Ярлык языка при этом НЕ откатывается: он описывает, на каком
+  // языке прошла расшифровка, а это случилось независимо от того, оставил
+  // человек её результат или нет.
+  const onUndoReplace = () => {
+    if (replaced === null) return
+    const view = viewRef.current
+    if (view) resetEditorContent(view, replaced)
+    setReplaced(null)
+    if (view) view.focus()
   }
 
   // vim-экшены 'slaivePaste'/'slaiveClose' (см. верх файла) объявлены и
@@ -1221,6 +1367,77 @@ export function Overlay() {
           normal режиме обрабатываются через Vim.mapCommand (см. верх файла);
           хоткей Copy — глобально (см. эффект выше), не здесь. */}
       <div className="transcript-field" ref={editorContainerRef} />
+      {/* Строка про ЯЗЫК — и ярлык, и селектор принудительного выбора.
+          Стоит между полем и действиями, вплотную под текстом, потому что
+          относится именно к тексту: ярлык отвечает «на каком языке это
+          прочитано», а селектор пересчитывает ЭТОТ ЖЕ текст на другом языке.
+          В строку статуса это не поместить: там уже микрофон, ON AIR, сам
+          статус и бейдж Vim-режима, и пятый элемент (а с селектором —
+          шестой) превратил бы её в свалку. К дорожке уровня — тоже нет: та
+          про звук, а язык про текст, и повторная расшифровка звука не
+          касается вовсе (см. onForceLanguage).
+
+          Видна только когда есть что показывать: в фазах записи и ожидания
+          ярлыку нечего сообщать, а пересчитывать нечего. Ярлык внутри строки
+          — отдельное условие: в авторежиме язык определила модель, и это
+          информация; при языке, приколотом в настройках, whisper его не
+          определял — ему его назвали, и повторять человеку его же настройку
+          значило бы занимать место шумом (решает бэкенд, см.
+          language_report). Селектор остаётся в обоих случаях: приколотая
+          настройка тоже бывает не тем, что нужно этой записи. */}
+      {(phase === 'ready' || retranscribing) && (
+        <div className="lang-row">
+          {language && (
+            <span className={`lang-chip${language.forced ? ' forced' : ''}`}>
+              {language.forced ? 'Forced' : 'Detected'}: {language.name}
+            </span>
+          )}
+          {/* Селектор сбрасывается в пустое значение после каждого выбора
+              (value="" — контролируемое): это кнопка-действие, а не поле
+              настройки, и показывать в нём «текущий язык» было бы обещанием
+              постоянства, которого здесь нет. Постоянное предпочтение живёт
+              в Recognition settings; выбор здесь действует на одну запись и
+              гаснет с началом следующей (см. rec:start). */}
+          <select
+            className="lang-force"
+            value=""
+            disabled={!hasRecording || retranscribing}
+            aria-label="Re-transcribe this recording in another language"
+            onChange={(e) => onForceLanguage(e.target.value as ForcedLanguage)}
+          >
+            <option value="" disabled>
+              {retranscribing ? 'Re-transcribing…' : 'Redo as…'}
+            </option>
+            {FORCED_LANGUAGES.map((l) => (
+              <option key={l.value} value={l.value}>
+                {l.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {/* Повтор не удался. Та же поверхность, что у подмены микрофона и
+          потолка сессии, и по той же причине: текст на месте и работает,
+          сломалась только попытка его улучшить. Фазой ошибки это быть не
+          может — она увела бы и строку языка, и селектор, и повторить
+          попытку стало бы нечем. */}
+      {retranscribeError && (
+        <div className="device-notice">
+          {retranscribeError} The text is unchanged.
+        </div>
+      )}
+      {/* Строка возврата заменённого текста — нейтральная плашка, не ошибка:
+          ничего не сломалось, текст заменён ровно так, как и просили. Тот же
+          приём, что .mw-notice в главном окне. */}
+      {replaced !== null && (
+        <div className="overlay-notice">
+          <span>{RETRANSCRIBE_NOTICE}</span>
+          <div className="overlay-notice-actions">
+            <button onClick={onUndoReplace}>Undo</button>
+            <button onClick={() => setReplaced(null)}>Dismiss</button>
+          </div>
+        </div>
+      )}
       {/* Регруппировка (часть 1 брифа): Play переехал к дорожке уровня
           (.levels-row выше — транспорт для звука, не действие над
           результатом), Close переехал в верхний угол панели (.overlay-close

@@ -1657,6 +1657,91 @@ button.primary {
   box-shadow: inset 0 0 0 1px rgba(255, 214, 10, 0.25);
 }
 
+/* Строка про язык расшифровки: ярлык слева, селектор принудительного выбора
+   справа (см. Overlay.tsx). Плотная и тихая — это метаданные текста, а не
+   ряд действий над ним: тот стоит ниже и выглядит как кнопки. */
+.overlay .lang-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+
+/* Ярлык языка — тот же плоский бейдж, что .vim-mode рядом в строке статуса:
+   одна форма на два «что сейчас в силе». Нейтральный, пока язык ОПРЕДЕЛЁН:
+   это просто факт о тексте. */
+.overlay .lang-chip {
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background: rgba(255, 255, 255, 0.10);
+  color: #9a9aa0;
+  white-space: nowrap;
+}
+
+/* Язык НАЗНАЧЕН принудительно — другой цвет, тот же янтарный, которым панель
+   уже говорит «сейчас действует не то, что по умолчанию» (.vim-mode-insert,
+   .device-notice). Так разовое переопределение видно на глаз и не путается с
+   обычным определением, а постоянное предпочтение остаётся в настройках. */
+.overlay .lang-chip.forced {
+  background: rgba(255, 214, 10, 0.12);
+  color: #ffd60a;
+}
+
+/* Селектор повторной расшифровки. Прижат вправо и узкий: это редкое
+   действие-починка, а не орган управления, который ищут глазами. Тот же
+   материал, что у полей настроек (--glass-field-*), только плотнее — в
+   панели всё плотнее. */
+.overlay .lang-force {
+  margin-left: auto;
+  flex-shrink: 0;
+  background: var(--glass-field-bg);
+  border: none;
+  border-radius: 5px;
+  padding: 3px 6px;
+  color: var(--glass-field-text);
+  font-size: 11px;
+  font-family: inherit;
+  box-shadow: var(--glass-field-shadow);
+}
+
+.overlay .lang-force:disabled {
+  opacity: 0.45;
+}
+
+/* Строка «текст заменён, вернуть?» — нейтральная плашка, не ошибка (ср.
+   .overlay .device-notice жёлтым выше): замена случилась ровно так, как её и
+   попросили, объяснить нужно только, куда делся прежний текст. Геометрия та
+   же, что у .mw-notice в главном окне — один приём, одна форма. */
+.overlay .overlay-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #f2f2f7;
+  background: rgba(255, 255, 255, 0.07);
+  border-radius: 5px;
+  padding: 5px 8px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+.overlay .overlay-notice-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* Кнопки в плашке — мельче кнопок действий: это «верни как было»/«понял», а
+   не то, ради чего панель открыли. Тот же приём, что .mw-error-actions. */
+.overlay .overlay-notice-actions button {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
 /* Иконка микрофона заполняет круглую кнопку целиком. Фон картинки тёмный в
    тон корпуса, поэтому обрезка по окружности не видна. Масштаб задаётся
    инлайн из Overlay.tsx по громкости (0..3); transition сглаживает шаги

@@ -53,6 +53,7 @@ fn main() {
             commands::list_input_devices,
             commands::start_recording,
             commands::stop_recording,
+            commands::retranscribe,
             commands::paste_text,
             commands::copy_text,
             commands::open_privacy_pane,
