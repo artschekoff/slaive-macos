@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { AiSettings } from './ai.ts'
+import type { RecentAction } from './recent-actions.ts'
 
 export type Settings = {
   hotkey: string
@@ -349,6 +350,40 @@ export const deleteHistoryEntry = (id: number) => invoke<void>('delete_history_e
 
 /** Wipes the history. Irreversible — the UI asks for confirmation first. */
 export const clearHistory = () => invoke<void>('clear_history')
+
+/** One remembered action of the main window's menu — a PATH through the action
+ *  tree plus its parameter, which is what an action actually is. The type
+ *  lives with the logic that builds and resolves it (`recent-actions.ts`), the
+ *  same split as `AiSettings` above; the file on disk holds exactly this shape
+ *  (see `src-tauri/src/recent_actions.rs`).
+ *
+ *  `query` is the user's own text, held to the same rule as a transcript: it
+ *  never reaches a log line, and a single entry can be deleted (see
+ *  `forgetRecentAction`). */
+export type { RecentAction }
+
+/** Reads the remembered actions, most recent first — the order they stand in
+ *  at the root of the menu. */
+export const listRecentActions = () => invoke<RecentAction[]>('list_recent_actions')
+
+/** Moves an action to the top of the remembered list and returns the new list.
+ *  Called when an action is STARTED, not when its proposal is accepted: the
+ *  list answers "what do I reach for", and an action cancelled because the
+ *  proposal was poor is exactly the one that gets repeated.
+ *
+ *  Repeating the same action moves it up instead of adding a second copy; for
+ *  `Ask AI` only a matching query counts as the same action. Returns the whole
+ *  resulting list, so the window never has to read the file back to find out
+ *  what the order became. */
+export const touchRecentAction = (path: string[], query: string) =>
+  invoke<RecentAction[]>('touch_recent_action', { path, query })
+
+/** Removes one action from the remembered list and returns the new list.
+ *  Exists for the same reason the history has per-entry delete: an `Ask AI`
+ *  query is personal text, and someone may have asked something they don't
+ *  want to see in the window every time. */
+export const forgetRecentAction = (path: string[], query: string) =>
+  invoke<RecentAction[]>('forget_recent_action', { path, query })
 
 /** Убирает главное окно и возвращает Dock-иконку (activation policy) в
  *  Accessory — тот же путь, которым окно уходит по крестику (см.

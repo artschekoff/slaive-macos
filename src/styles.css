@@ -1309,8 +1309,12 @@ button.primary {
    приглушён: это приватный инструмент, и прятать его до наведения мыши
    значит прятать единственный способ убрать сказанное. Материал кнопки
    корпуса здесь снят целиком — кнопка-плашка поверх плитки читалась бы
-   как вторая, главная кнопка. */
-.main-window button.history-tile-delete {
+   как вторая, главная кнопка.
+   Тот же крестик стоит и у строки быстрого вызова (.mw-recent-forget, см.
+   ниже): одно и то же действие «убрать это из списка» — значит и один вид,
+   а не два похожих. Отличается только положение, оно и переопределено там. */
+.main-window button.history-tile-delete,
+.main-window button.mw-recent-forget {
   position: absolute;
   top: 5px;
   right: 5px;
@@ -1330,12 +1334,14 @@ button.primary {
   color: rgba(242, 242, 247, 0.45);
 }
 
-.main-window button.history-tile-delete:hover {
+.main-window button.history-tile-delete:hover,
+.main-window button.mw-recent-forget:hover {
   color: #fff;
   background: rgba(255, 69, 58, 0.85);
 }
 
-.main-window button.history-tile-delete:active {
+.main-window button.history-tile-delete:active,
+.main-window button.mw-recent-forget:active {
   background: rgba(255, 69, 58, 0.6);
   transform: none;
 }
@@ -1418,6 +1424,72 @@ button.primary {
   /* Кольцо ВНУТРЬ, а не наружу: внешнее у краёв окна вылезало за корпус
      (и резалось overflow'ом .mw-menu во время анимации высоты). */
   box-shadow: inset 0 0 0 2px rgba(109, 188, 255, 0.55);
+}
+
+/* ===== Быстрый вызов недавних действий =====
+   Три верхние строки столбца в корне меню (см. recent-actions.ts). Это
+   обычные пункты того же списка, а не отдельный виджет: материал кнопки,
+   подсветка выбора и бейдж хоткея приходят от правил выше и здесь не
+   повторяются ни строкой. Своё у них ровно три вещи. */
+
+/* Первая — обёртка под крестик удаления, как у плитки истории: строка
+   занимает одну ячейку сетки, кнопка выполнения заполняет её целиком, а
+   крестик лежит поверх. */
+.mw-recent {
+  position: relative;
+}
+
+/* Вторая — подпись по левому краю и место под крестик справа. По левому, а
+   не по центру, потому что подпись здесь ПЕРЕМЕННАЯ («Translate → Russian»,
+   «Ask AI: make this more formal») и может не влезть: обрезаться многоточием
+   она должна с той стороны, с которой её читают последней, а начало —
+   остаться на месте. У обычных действий подпись короткая и постоянная, им
+   центр подходит. */
+.main-window .action-grid button.mw-recent-run {
+  width: 100%;
+  text-align: left;
+  padding-right: 32px;
+}
+
+/* Крестик — тот же инструмент и тот же материал, что у плитки истории
+   (.history-tile-delete выше): одно и то же «убрать это из списка», и две
+   разные кнопки для него завели бы два разных вида у одного действия.
+   Своё здесь — положение: строка, а не плитка, поэтому по вертикали он
+   встаёт по центру. transform повторён в :active, потому что общее правило
+   плитки гасит там transform целиком, а здесь на нём держится центрирование.
+   Селектор с .action-grid, и padding с радиусом повторены, РОВНО по
+   специфичности: этот крестик, в отличие от плитки истории, живёт ВНУТРИ
+   .action-grid, а укрупняющее правило столбца (.main-window .action-grid
+   button выше) весит столько же, сколько общее правило крестика, и стоит в
+   файле позже — без этого оно раздуло бы его до кнопки действия. */
+.main-window .action-grid button.mw-recent-forget {
+  top: 50%;
+  right: 7px;
+  transform: translateY(-50%);
+  padding: 0;
+  border-radius: 50%;
+}
+
+.main-window .action-grid button.mw-recent-forget:active {
+  transform: translateY(-50%);
+}
+
+/* Третья — отделение быстрого списка от основных действий. Линия нарисована
+   на ПЕРВОЙ кнопке уровня, а не отдельной строкой-разделителем: пустого
+   заголовка над пустотой при пустом списке тогда не бывает по построению, и
+   в role="listbox" не появляется пункта, которого нельзя выбрать. */
+.main-window .action-grid button.mw-after-recent {
+  margin-top: 9px;
+}
+
+.main-window .action-grid button.mw-after-recent::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -9px;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.12);
 }
 
 /* Тот же паттерн и та же подсветка — для сетки истории (см. HistoryView.tsx

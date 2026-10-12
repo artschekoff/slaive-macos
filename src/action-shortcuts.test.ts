@@ -4,6 +4,8 @@ import {
   DEFAULT_ACTION_SHORTCUTS,
   shortcutFor,
   nodeForKey,
+  quickIndexForKey,
+  quickShortcutFor,
   type ActionShortcuts,
 } from './action-shortcuts.ts'
 import { ACTION_TREE, buildActionTree, type MenuNode } from './action-tree.ts'
@@ -138,4 +140,67 @@ test('на подуровне корневые хоткеи не срабаты�
 
 test('в корне позиционные цифры не срабатывают', () => {
   assert.equal(nodeForKey(cmd('Digit1'), ACTION_TREE, true, DEFAULT_ACTION_SHORTCUTS), null)
+})
+
+// ===== Быстрый вызов недавних действий =====
+// Бриф прямо требует не принимать отсутствие столкновения на веру: в корне
+// заняты ⌘L, ⌘K, ⌘G, ⌘F, ⌘S, ⌘U, а ⌘1…⌘9 используются в подменю.
+
+test('быстрые пункты получают ⌘1…⌘3, в корне эти номера больше ничем не заняты', () => {
+  const taken = Object.values(DEFAULT_ACTION_SHORTCUTS)
+  assert.equal(quickShortcutFor(0, taken), 'Super+Digit1')
+  assert.equal(quickShortcutFor(1, taken), 'Super+Digit2')
+  assert.equal(quickShortcutFor(2, taken), 'Super+Digit3')
+  // Проверено, а не принято на веру: ни один дефолт действия не стоит на цифре.
+  for (const accel of taken) assert.ok(!accel.startsWith('Super+Digit'), `${accel} на цифре`)
+})
+
+test('позиционные номера корня и подменю не спорят: уровни разные', () => {
+  // ⌘1 в подменю — первый язык; в корне тех кнопок на экране нет вовсе, и
+  // nodeForKey разбирает ровно нарисованный уровень (проверено тестом выше).
+  // Значит ⌘1 в корне свободен для быстрого пункта, а в подменю быстрых
+  // пунктов нет (см. buildColumnItems в recent-actions.ts).
+  assert.equal(nodeForKey(cmd('Digit1'), ACTION_TREE, true, DEFAULT_ACTION_SHORTCUTS), null)
+  assert.equal(
+    nodeForKey(cmd('Digit1'), branch.children, false, DEFAULT_ACTION_SHORTCUTS)?.id,
+    'translate-english'
+  )
+})
+
+test('назначенную пользователем комбинацию быстрый пункт не затеняет', () => {
+  // Единственное реальное столкновение: ⌘1, назначенная действию в
+  // настройках. Молча проиграть обязан НЕ настроенный хоткей — быстрый пункт
+  // просто остаётся без бейджа (и доступен стрелками и мышью).
+  const custom: ActionShortcuts = { ...DEFAULT_ACTION_SHORTCUTS, fixShortcut: 'Super+Digit1' }
+  const taken = Object.values(custom)
+  assert.equal(quickShortcutFor(0, taken), null)
+  assert.equal(quickShortcutFor(1, taken), 'Super+Digit2')
+  assert.equal(quickIndexForKey(cmd('Digit1'), 3, taken), null)
+  // А настроенный Fix по этой комбинации срабатывает как обычно.
+  assert.equal(nodeForKey(cmd('Digit1'), ACTION_TREE, true, custom)?.id, 'fix')
+})
+
+test('комбинации Paste/Copy/Accept главного окна тоже считаются занятыми', () => {
+  // Они не поля ActionShortcuts, но перехватывает их то же окно, и затенить
+  // их позиционным номером было бы ровно тем же молчаливым отказом.
+  const taken = [...Object.values(DEFAULT_ACTION_SHORTCUTS), 'Super+Digit2']
+  assert.equal(quickShortcutFor(0, taken), 'Super+Digit1')
+  assert.equal(quickShortcutFor(1, taken), null)
+})
+
+test('хоткея нет у пункта, которого нет на экране', () => {
+  const taken = Object.values(DEFAULT_ACTION_SHORTCUTS)
+  // Список из одного пункта: ⌘2 не достаётся никому.
+  assert.equal(quickIndexForKey(cmd('Digit1'), 1, taken), 0)
+  assert.equal(quickIndexForKey(cmd('Digit2'), 1, taken), null)
+  // И номера за пределами клавиатурного ряда цифр не выдаются.
+  assert.equal(quickShortcutFor(9, taken), null)
+  assert.equal(quickShortcutFor(-1, taken), null)
+})
+
+test('голая цифра без Cmd быстрый пункт не запускает', () => {
+  // Та же причина, что у остальных хоткеев окна: голая цифра — это ввод в
+  // insert-режиме Vim.
+  const taken = Object.values(DEFAULT_ACTION_SHORTCUTS)
+  assert.equal(quickIndexForKey(press('Digit1'), 3, taken), null)
 })

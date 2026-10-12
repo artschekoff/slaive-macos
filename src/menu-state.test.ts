@@ -15,6 +15,7 @@ import {
   moveSelectionUp,
   resetSelectionForLevel,
   clampSelectionIndex,
+  branchPathIds,
 } from './menu-state.ts'
 
 test('root state starts at the root of ACTION_TREE and is flagged as root', () => {
@@ -172,4 +173,29 @@ test('clampSelectionIndex pulls an out-of-range index back inside a shorter list
 
 test('clampSelectionIndex on an empty list is 0, not negative or NaN', () => {
   assert.equal(clampSelectionIndex(4, 0), 0)
+})
+
+// Путь по веткам — то, из чего вместе с нажатым узлом получается запомненное
+// действие (см. recent-actions.ts): действие это путь плюс параметр, и один
+// лист его не описывает.
+test('branchPathIds: empty at the root, the branch id one level down', () => {
+  const root = rootMenuState()
+  assert.deepEqual(branchPathIds(root), [])
+
+  const translate = ACTION_TREE.find((n) => n.id === 'translate')!
+  const inside = enterNode(root, translate)
+  assert.deepEqual(branchPathIds(inside), ['translate'])
+
+  // Возврат возвращает и путь — он читается из стека, второго состояния для
+  // него нет.
+  assert.deepEqual(branchPathIds(goBack(inside)), [])
+})
+
+test('branchPathIds: the prompt form does not add a level of its own', () => {
+  // Форма свободного запроса не уровень дерева: стек под ней не меняется, и
+  // путь остаётся путём того уровня, с которого в неё вошли. Id самого
+  // prompt-узла дописывает вызывающая сторона (actionPath).
+  const askAi = ACTION_TREE.find((n) => n.id === 'ask-ai')!
+  const prompt = enterNode(rootMenuState(), askAi)
+  assert.deepEqual(branchPathIds(prompt), [])
 })

@@ -7,6 +7,7 @@ mod commands;
 mod history;
 mod macos;
 mod model;
+mod recent_actions;
 mod settings;
 mod state;
 mod whisper;
@@ -78,6 +79,9 @@ fn main() {
             commands::count_prompt_tokens,
             commands::delete_history_entry,
             commands::clear_history,
+            commands::list_recent_actions,
+            commands::touch_recent_action,
+            commands::forget_recent_action,
         ])
         .setup(|app| {
             let dir = commands::data_dir(app.handle())?;

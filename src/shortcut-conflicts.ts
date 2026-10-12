@@ -40,7 +40,15 @@ export type ShortcutScope = 'global' | 'panel' | 'main'
  *
  *  Escape сюда не входит: он не хранится ни в одном поле (Back/Cancel, см.
  *  ESCAPE_SHORTCUT в action-shortcuts.ts) и назначить его на что-то ещё
- *  нельзя — ShortcutCapture трактует Escape как отмену записи комбинации. */
+ *  нельзя — ShortcutCapture трактует Escape как отмену записи комбинации.
+ *
+ *  Позиционные ⌘1…⌘9 (пункты подменю и строки быстрого вызова, см.
+ *  shortcutFor и quickShortcutFor в action-shortcuts.ts) тоже не входят — и
+ *  по той же причине: они НЕ ХРАНЯТСЯ, а считаются из позиции кнопки, и
+ *  настраивать их нечем. Проверка на их счёт не ослаблена, она просто живёт
+ *  не здесь: позиционный номер, уже назначенный какому-то полю из списка
+ *  ниже, быстрой строке не выдаётся вовсе (quickShortcutFor), поэтому
+ *  настроенная комбинация всегда делает то, что написано в настройках. */
 export const SHORTCUT_FIELDS = [
   { key: 'hotkey', label: 'Record hotkey', scope: 'global' },
   { key: 'captureHotkey', label: 'Capture selection', scope: 'global' },

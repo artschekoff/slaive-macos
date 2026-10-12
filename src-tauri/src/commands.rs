@@ -4,6 +4,7 @@ use crate::capture::{self, CaptureOps};
 use crate::history;
 use crate::macos;
 use crate::model::{self, ModelEntry};
+use crate::recent_actions;
 use crate::settings::{self, Settings};
 use crate::state::AppState;
 use crate::whisper::{Transcriber, MIN_SAMPLES};
@@ -2230,6 +2231,69 @@ pub fn clear_history(app: AppHandle) -> Result<(), String> {
     history::clear(&dir).map_err(|e| e.to_string())?;
     log::info!("история: очищена");
     Ok(())
+}
+
+/// Недавно выполненные действия меню, от самого недавнего к старым — в этом
+/// порядке они и стоят в корне меню (см. `recent_actions`). Разворота здесь
+/// нет: файл и так хранится в порядке показа.
+#[tauri::command]
+pub fn list_recent_actions(app: AppHandle) -> Result<Vec<recent_actions::Action>, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    let actions = recent_actions::load(&dir).map_err(|e| e.to_string())?;
+    // Только числа. `query` — текст пользователя, он не логируется ни здесь,
+    // ни где-либо ещё, ровно как расшифровки.
+    log::info!(
+        "недавние действия: записей {}, файл {} байт",
+        actions.len(),
+        recent_actions::file_bytes(&dir)
+    );
+    Ok(actions)
+}
+
+/// Поднимает действие наверх списка недавних и возвращает новый список.
+///
+/// Зовёт главное окно в момент ЗАПУСКА действия, а не после Accept: список
+/// отвечает на вопрос «к чему я тянусь», а действие, отменённое из-за
+/// неудачного предложения модели, — ровно то, которое человек повторит.
+///
+/// Возвращает получившийся список целиком, а не `()`: окно рисует его сразу
+/// после вызова, и вторая ходка на диск («а теперь прочитай, что получилось»)
+/// была бы лишней — порядок уже решён здесь.
+///
+/// `path` — идентификаторы узлов дерева меню (`["translate",
+/// "translate-russian"]`), `query` — свободный запрос prompt-узла. Ни то ни
+/// другое никогда не становится путём в файловой системе: файл один и его
+/// имя задано в модуле.
+#[tauri::command]
+pub fn touch_recent_action(
+    app: AppHandle,
+    path: Vec<String>,
+    query: String,
+) -> Result<Vec<recent_actions::Action>, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    let actions = recent_actions::touch(&dir, recent_actions::Action { path, query })
+        .map_err(|e| e.to_string())?;
+    log::info!("недавние действия: записей {}", actions.len());
+    Ok(actions)
+}
+
+/// Убирает одно действие из списка недавних и возвращает новый список.
+///
+/// Существует по той же причине, что удаление одной записи истории: запрос к
+/// Ask AI — личный текст, и человек мог спросить то, что не хочет видеть в
+/// окне каждый раз. Подтверждения нет — цена ошибки одна запись, и путь к
+/// приватному инструменту не должен быть длиннее остальных.
+#[tauri::command]
+pub fn forget_recent_action(
+    app: AppHandle,
+    path: Vec<String>,
+    query: String,
+) -> Result<Vec<recent_actions::Action>, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    let actions = recent_actions::forget(&dir, &recent_actions::Action { path, query })
+        .map_err(|e| e.to_string())?;
+    log::info!("недавние действия: записей {}", actions.len());
+    Ok(actions)
 }
 
 #[cfg(test)]

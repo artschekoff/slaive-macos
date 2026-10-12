@@ -21,9 +21,23 @@ import {
   moveSelectionUp,
   resetSelectionForLevel,
   clampSelectionIndex,
+  branchPathIds,
   type MenuState,
 } from './menu-state'
-import { buildActionTree, DEFAULT_TRANSLATE_LANGUAGES, type LeafNode } from './action-tree'
+import {
+  buildActionTree,
+  DEFAULT_TRANSLATE_LANGUAGES,
+  type LeafNode,
+  type PromptNode,
+} from './action-tree'
+import {
+  buildColumnItems,
+  resolveRecentActions,
+  toRecentAction,
+  type ColumnItem,
+  type RecentAction,
+  type ResolvedRecentAction,
+} from './recent-actions'
 import {
   idleApplyState,
   startRequest,
@@ -45,6 +59,9 @@ import {
   copyText,
   pasteText,
   openPrivacyPane,
+  listRecentActions,
+  touchRecentAction,
+  forgetRecentAction,
   type HistoryEntry,
   type Settings,
   type SourceApp,
@@ -55,6 +72,8 @@ import {
   DEFAULT_ACTION_SHORTCUTS,
   ESCAPE_SHORTCUT,
   nodeForKey,
+  quickIndexForKey,
+  quickShortcutFor,
   shortcutFor,
   type ActionShortcuts,
 } from './action-shortcuts'
@@ -116,6 +135,30 @@ export function MainWindow() {
   // Временное «Copied» на кнопке копирования — как в Overlay.tsx.
   const [copied, setCopied] = useState(false)
   const [promptQuery, setPromptQuery] = useState('')
+
+  // Недавно выполненные действия — три верхних пункта корня меню, по которым
+  // то же самое вызывается одним нажатием, без прохода по уровням. Лежат на
+  // диске рядом с историей расшифровок (см. recent_actions.rs), поэтому
+  // читаются один раз на монтировании: окно между вызовами не пересоздаётся,
+  // а дальше список приходит ОТВЕТОМ на каждое изменение (touch/forget
+  // возвращают получившийся порядок) — второй ходки за ним не нужно.
+  //
+  // Хранится путь плюс параметр, без подписи; подпись собирается по живому
+  // дереву (см. recent-actions.ts), поэтому правка списка языков в настройках
+  // автоматически убирает из быстрого списка язык, которого больше нет.
+  const [recentActions, setRecentActions] = useState<RecentAction[]>([])
+  useEffect(() => {
+    listRecentActions()
+      .then(setRecentActions)
+      // Нет файла или он не читается — список просто пуст. Поднимать из-за
+      // этого баннер над текстом незачем: ни одно действие от списка не
+      // зависит, все кнопки меню на месте.
+      .catch(() => setRecentActions([]))
+  }, [])
+  const resolvedRecent = useMemo(
+    () => resolveRecentActions(actionTree, recentActions),
+    [actionTree, recentActions]
+  )
 
   // Столбец меню действий, переключаемый стрелками (бриф: "все кнопки в
   // меню... столбец... переключать стрелочками вверх и вниз", то же для
@@ -386,22 +429,73 @@ export function MainWindow() {
       })
   }
 
-  const onLeafClick = (node: LeafNode) => {
-    if (!hasText || applyState.phase !== 'idle') return
-    const { system, user } = node.buildRequest(currentText())
-    runRequest(system, user)
+  // Запоминание выполненного действия. Молча, без баннера: само действие уже
+  // пошло к провайдеру, список быстрого вызова — удобство поверх него, и
+  // сообщать об неудачной записи файла поверх текста, с которым человек
+  // прямо сейчас работает, значило бы перебить главное второстепенным.
+  // Следующее действие попробует снова. В консоль тоже ничего: в запросе
+  // лежит личный текст (см. recent-actions.ts).
+  const remember = (action: RecentAction) => {
+    touchRecentAction(action.path, action.query)
+      .then(setRecentActions)
+      .catch(() => {})
   }
 
-  const onPromptSubmit = () => {
-    const prompt = menuState.prompt
-    const query = promptQuery.trim()
-    if (!prompt || applyState.phase !== 'idle') return
+  /**
+   * ЕДИНСТВЕННЫЙ путь запуска действия — им идут все точки входа: клик по
+   * кнопке, Enter в столбце, хоткей, форма Ask AI и пункт быстрого вызова.
+   * Быстрое действие не получает второго пути исполнения: тот же узел, тот же
+   * запрос к модели, тот же цикл «предложено → принять или отменить».
+   *
+   * `branchIds` — ветки, через которые пришли (см. branchPathIds): вместе с
+   * узлом они и составляют путь, который запоминается. Запоминаем В МОМЕНТ
+   * ЗАПУСКА, а не после Accept: список отвечает на вопрос «к чему я тянусь»,
+   * и действие, отменённое из-за неудачного предложения, — ровно то, которое
+   * повторят. Действие, выполненное из быстрого списка, тем же вызовом
+   * поднимается в нём наверх, а не исключается из него.
+   */
+  const runNode = (target: LeafNode | PromptNode, query: string, branchIds: string[]) => {
+    if (applyState.phase !== 'idle') return
+    if (!hasText && !target.worksOnEmpty) return
     // Обычному prompt-действию (Ask AI) нужны и текст, и запрос; узел с
     // worksOnEmpty (Generate) запускается с любым их сочетанием, включая
     // полностью пустое — «сгенерировать с нуля».
-    if (!prompt.worksOnEmpty && (!hasText || !query)) return
-    const { system, user } = prompt.buildRequest(currentText(), query)
+    if (target.kind === 'prompt' && !target.worksOnEmpty && !query) return
+    const { system, user } =
+      target.kind === 'leaf'
+        ? target.buildRequest(currentText())
+        : target.buildRequest(currentText(), query)
+    remember(toRecentAction(branchIds, target, query))
     runRequest(system, user)
+  }
+
+  const onLeafClick = (node: LeafNode) => runNode(node, '', branchPathIds(menuState))
+
+  const onPromptSubmit = () => {
+    const prompt = menuState.prompt
+    if (!prompt) return
+    runNode(prompt, promptQuery.trim(), branchPathIds(menuState))
+  }
+
+  // Пункт быстрого вызова: путь уже запомнен целиком, поэтому ветки берутся
+  // из него, а не из текущего положения в меню — быстрый вызов на то и
+  // быстрый, что по уровням не ходят.
+  const onQuickAction = (recent: ResolvedRecentAction) =>
+    runNode(recent.target, recent.action.query, recent.action.path.slice(0, -1))
+
+  // Удаление одного пункта — без подтверждения, как у плитки истории и по той
+  // же причине: это приватный инструмент (в запросе Ask AI лежит личный
+  // текст), и путь к нему не должен быть длиннее остальных. Цена ошибки —
+  // одна строка, которая вернётся сама, как только действие выполнят снова.
+  //
+  // Отказ, в отличие от записи выше, показывается: человек попросил убрать
+  // личный текст, и промолчать здесь значило бы соврать ровно в том месте,
+  // где он рассчитывает на обратное. Список при этом не трогаем — на диске
+  // запись осталась. Тот же приём, что у onDelete в HistoryView.
+  const onForgetRecent = (recent: ResolvedRecentAction) => {
+    forgetRecentAction(recent.action.path, recent.action.query)
+      .then(setRecentActions)
+      .catch((e) => setActionError(String(e)))
   }
 
   // Cancel всегда применяет `original` из applyState — при pending текст в
@@ -542,6 +636,34 @@ export function MainWindow() {
   const level = currentLevel(menuState)
   const showingPrompt = menuState.prompt !== null
   const atRoot = isRoot(menuState)
+
+  // Состав столбца: быстрые действия (только в корне) и пункты уровня — ОДИН
+  // массив, потому что это одна колонка. Стрелочная навигация считает индекс
+  // по нему, поэтому «стрелки проходят быстрые действия» получается по
+  // построению, а не вторым механизмом выбора (см. recent-actions.ts).
+  const columnItems = buildColumnItems(level, resolvedRecent, atRoot)
+  // Комбинации, которые главное окно уже перехватывает: позиционный ⌘N
+  // быстрого пункта не должен затенить назначенную пользователем (см.
+  // quickShortcutFor). Собирается здесь, потому что только здесь известны все
+  // поля настроек этого окна.
+  const takenAccels = [
+    ...Object.values(actionShortcuts),
+    mainPasteShortcut,
+    mainCopyShortcut,
+    acceptShortcut,
+  ]
+
+  // Доступность пункта — то же правило, что у кнопок уровня: без текста
+  // действие нечего делать, кроме узлов с worksOnEmpty.
+  const itemDisabled = (item: ColumnItem) =>
+    !hasText && !(item.kind === 'recent' ? item.recent.target : item.node).worksOnEmpty
+
+  // Активация пункта столбца — один переход на клик, Enter и хоткей.
+  const activateColumnItem = (item: ColumnItem) => {
+    if (item.kind === 'recent') return onQuickAction(item.recent)
+    if (item.node.kind === 'leaf') return onLeafClick(item.node)
+    setMenuState(enterNode(menuState, item.node))
+  }
 
   // Хоткеи окна: обычный window keydown, как Paste/Copy в оверлее, а НЕ
   // tauri-plugin-global-shortcut — глобальная регистрация может не удаться,
@@ -691,23 +813,23 @@ export function MainWindow() {
       // событие после этого обработчика дошло бы и до onKeyDown списка, и
       // один Arrow шагал бы на два пункта.
       if (
-        level.length > 0 &&
+        columnItems.length > 0 &&
         !(gridRef.current?.contains(document.activeElement) ?? false) &&
         arrowsAvailable()
       ) {
         let moved = true
         switch (e.key) {
           case 'ArrowDown':
-            setSelectedIndex((i) => moveSelectionDown(i, level.length))
+            setSelectedIndex((i) => moveSelectionDown(i, columnItems.length))
             break
           case 'ArrowUp':
-            setSelectedIndex((i) => moveSelectionUp(i, level.length))
+            setSelectedIndex((i) => moveSelectionUp(i, columnItems.length))
             break
           case 'Home':
             setSelectedIndex(0)
             break
           case 'End':
-            setSelectedIndex(level.length - 1)
+            setSelectedIndex(columnItems.length - 1)
             break
           default:
             moved = false
@@ -723,12 +845,32 @@ export function MainWindow() {
         }
       }
 
+      // Узлы уровня — ПЕРВЫМИ, и это не произвольный порядок: настроенная
+      // пользователем комбинация должна делать то, что написано в
+      // настройках, даже если он назначил на неё ⌘1. Затенить её позиционный
+      // хоткей быстрого пункта не может и по построению (quickShortcutFor не
+      // выдаёт занятый номер), но порядок разбора говорит об этом тем же
+      // решением, а не второй договорённостью.
       const node = nodeForKey(e, level, atRoot, actionShortcuts)
-      if (!node) return
-      if (!hasText && !node.worksOnEmpty) return
+      if (node) {
+        if (!hasText && !node.worksOnEmpty) return
+        e.preventDefault()
+        if (node.kind === 'leaf') onLeafClick(node)
+        else setMenuState(enterNode(menuState, node))
+        return
+      }
+
+      // Быстрый вызов — позиционные ⌘1…⌘3, только в корне: ровно там, где
+      // эти пункты и нарисованы (см. buildColumnItems). В подменю те же
+      // номера принадлежат языкам, и обе роли никогда не бывают на экране
+      // одновременно.
+      if (!atRoot) return
+      const quick = quickIndexForKey(e, resolvedRecent.length, takenAccels)
+      if (quick === null) return
+      const recent = resolvedRecent[quick]
+      if (!hasText && !recent.target.worksOnEmpty) return
       e.preventDefault()
-      if (node.kind === 'leaf') onLeafClick(node)
-      else setMenuState(enterNode(menuState, node))
+      onQuickAction(recent)
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
@@ -796,11 +938,19 @@ export function MainWindow() {
   const idlePanelKey = showingPrompt
     ? `prompt:${menuState.prompt!.id}`
     : `level:${depth}:${level.map((n) => n.id).join(',')}`
+  // Отпечаток быстрого списка — только ПУТИ, без запросов: запрос это личный
+  // текст, и в строке, которая живёт в ключах React, ему не место. Нужен
+  // отдельно от idlePanelKey, и именно поэтому отдельно: по idlePanelKey
+  // решается НАПРАВЛЕНИЕ скольжения между уровнями, а смена состава быстрого
+  // списка — не переход на другой уровень, и анимировать её нечем. Сброс
+  // подсветки же нужен: строки сдвинулись, и индекс остался бы указывать на
+  // другое действие, чем то, на которое смотрит человек.
+  const quickFingerprint = resolvedRecent.map((r) => r.action.path.join('>')).join('|')
   // Индекс под подсветкой стрелок, но всегда внутри границ ТЕКУЩЕГО level —
   // clampSelectionIndex (menu-state.ts) страхует момент между тем, как
   // список языков поменялся в настройках, и эффектом ниже, который сбросит
   // selectedIndex на 0 для нового уровня.
-  const selectedGridIndex = clampSelectionIndex(selectedIndex, level.length)
+  const selectedGridIndex = clampSelectionIndex(selectedIndex, columnItems.length)
   const idlePanelNode: ReactNode = showingPrompt ? (
     <>
       <input
@@ -862,7 +1012,9 @@ export function MainWindow() {
       aria-label={currentLevelLabel(menuState) ?? 'Actions'}
       tabIndex={0}
       aria-activedescendant={
-        level.length > 0 ? `mw-option-${depth}-${level[selectedGridIndex].id}` : undefined
+        columnItems.length > 0
+          ? `mw-option-${depth}-${columnItems[selectedGridIndex].key}`
+          : undefined
       }
       onFocus={() => {
         menuHadFocusRef.current = true
@@ -871,7 +1023,7 @@ export function MainWindow() {
         menuHadFocusRef.current = false
       }}
       onKeyDown={(e) => {
-        if (level.length === 0) return
+        if (columnItems.length === 0) return
         // Vim-навигация по списку: j/k — те же движения, что ArrowDown/Up.
         // Работает только когда фокус УЖЕ на списке (этот обработчик) — в
         // редакторе j/k остаются vim-моушенами по строкам текста, отбирать
@@ -881,18 +1033,20 @@ export function MainWindow() {
         if ((e.key === 'j' || e.key === 'k') && !e.metaKey && !e.ctrlKey && !e.altKey) {
           e.preventDefault()
           setSelectedIndex((i) =>
-            e.key === 'j' ? moveSelectionDown(i, level.length) : moveSelectionUp(i, level.length)
+            e.key === 'j'
+              ? moveSelectionDown(i, columnItems.length)
+              : moveSelectionUp(i, columnItems.length)
           )
           return
         }
         switch (e.key) {
           case 'ArrowDown':
             e.preventDefault()
-            setSelectedIndex((i) => moveSelectionDown(i, level.length))
+            setSelectedIndex((i) => moveSelectionDown(i, columnItems.length))
             return
           case 'ArrowUp':
             e.preventDefault()
-            setSelectedIndex((i) => moveSelectionUp(i, level.length))
+            setSelectedIndex((i) => moveSelectionUp(i, columnItems.length))
             return
           case 'Home':
             e.preventDefault()
@@ -900,44 +1054,95 @@ export function MainWindow() {
             return
           case 'End':
             e.preventDefault()
-            setSelectedIndex(level.length - 1)
+            setSelectedIndex(columnItems.length - 1)
             return
           case 'Enter': {
             // Активирует подсвеченный пункт — тот же переход, что у клика по
             // нему. Условие недоступности то же самое, что у самих кнопок
             // ниже (пустой текст, кроме узлов с worksOnEmpty).
-            const node = level[selectedGridIndex]
-            if (!hasText && !node.worksOnEmpty) return
+            const item = columnItems[selectedGridIndex]
+            if (itemDisabled(item)) return
             e.preventDefault()
-            if (node.kind === 'leaf') onLeafClick(node)
-            else setMenuState(enterNode(menuState, node))
+            activateColumnItem(item)
             return
           }
         }
       }}
     >
-      {level.map((node, i) => {
+      {columnItems.map((item, i) => {
+        const selected = i === selectedGridIndex
+        const id = `mw-option-${depth}-${item.key}`
+        const disabled = itemDisabled(item)
+        // Быстрое действие — та же кнопка столбца, но с крестиком удаления
+        // поверх, ровно как плитка истории (см. HistoryView.tsx): кнопка
+        // выполнения — единственный пункт обхода, крестик из него исключён
+        // (tabIndex={-1}) и остаётся инструментом мыши. Клавиатурного
+        // удаления здесь нет намеренно, по той же причине, что и в истории:
+        // вешать удаление на клавишу рядом со стрелками навигации без
+        // явного запроса — слишком дорогая ошибка.
+        // ponytail: удаление только мышью — добавить клавишу, если появится
+        // запрос на полностью клавиатурный путь к нему.
+        if (item.kind === 'recent') {
+          const accel = quickShortcutFor(i, takenAccels)
+          return (
+            <div className="mw-recent" key={item.key}>
+              <button
+                id={id}
+                role="option"
+                aria-selected={selected}
+                tabIndex={-1}
+                className={`mw-recent-run${selected ? ' is-selected' : ''}`}
+                disabled={disabled}
+                onClick={() => activateColumnItem(item)}
+                title={`Run ${item.recent.label} again`}
+              >
+                {item.recent.label}
+                {accel && <span className="shortcut-badge">{formatShortcutBadge(accel)}</span>}
+              </button>
+              <button
+                className="mw-recent-forget"
+                tabIndex={-1}
+                onClick={() => onForgetRecent(item.recent)}
+                title="Remove this from the recent list"
+                aria-label="Remove this from the recent list"
+              >
+                ×
+              </button>
+            </div>
+          )
+        }
         // Бейдж рисуется из НАСТРОЙКИ (или из позиции в подменю), а не из
         // зашитой строки: поменял комбинацию в настройках — подпись на кнопке
         // поменялась вместе с тем, что реально срабатывает, потому что и то и
-        // другое берётся из одного вызова shortcutFor.
-        const accel = shortcutFor(node, i, atRoot, actionShortcuts)
-        const selected = i === selectedGridIndex
+        // другое берётся из одного вызова shortcutFor. Индекс берётся из
+        // самого пункта (его место в `level`), а не из места в столбце:
+        // нумерация ⌘1…⌘9 в подменю не должна зависеть от того, сколько
+        // строк приехало выше.
+        const accel = shortcutFor(item.node, item.index, atRoot, actionShortcuts)
+        // Первая кнопка уровня отделяет действия от быстрого списка над ней —
+        // классом на ней самой, а не отдельной строкой-разделителем: пустого
+        // заголовка над пустотой при пустом списке тогда не бывает по
+        // построению, да и лишнего пункта в role="listbox" не появляется.
+        const firstAfterRecent = item.index === 0 && atRoot && resolvedRecent.length > 0
         return (
           <button
-            key={node.id}
-            id={`mw-option-${depth}-${node.id}`}
+            key={item.key}
+            id={id}
             role="option"
             aria-selected={selected}
             // Не отдельный tab-стоп (см. пояснение выше про контейнер) —
             // мышь по-прежнему кликает кнопку напрямую, клавиатура работает
             // через контейнер.
             tabIndex={-1}
-            className={selected ? 'is-selected' : undefined}
-            disabled={!hasText && !node.worksOnEmpty}
-            onClick={() => (node.kind === 'leaf' ? onLeafClick(node) : setMenuState(enterNode(menuState, node)))}
+            className={
+              [selected ? 'is-selected' : '', firstAfterRecent ? 'mw-after-recent' : '']
+                .filter(Boolean)
+                .join(' ') || undefined
+            }
+            disabled={disabled}
+            onClick={() => activateColumnItem(item)}
           >
-            {node.label}
+            {item.node.label}
             {accel && <span className="shortcut-badge">{formatShortcutBadge(accel)}</span>}
           </button>
         )
@@ -951,7 +1156,7 @@ export function MainWindow() {
   // другой состав кнопок.
   useEffect(() => {
     setSelectedIndex(resetSelectionForLevel())
-  }, [idlePanelKey])
+  }, [idlePanelKey, quickFingerprint])
 
   // Возврат DOM-фокуса в меню после смены уровня, если он был там
   // непосредственно перед сменой (см. menuHadFocusRef выше). Без этого

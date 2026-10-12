@@ -52,10 +52,34 @@ export function menuDepth(state: MenuState): number {
 export function currentLevelLabel(state: MenuState): string | null {
   if (state.prompt !== null) return state.prompt.label
   if (state.stack.length <= 1) return null
-  const items = currentLevel(state)
-  const parent = state.stack[state.stack.length - 2]
-  const owner = parent.find((n) => n.kind === 'branch' && n.children === items)
+  const owner = ownerOf(state.stack[state.stack.length - 2], currentLevel(state))
   return owner ? owner.label : null
+}
+
+/** Ветка родительского уровня, чьи дети и есть `items`. Сравнение по ССЫЛКЕ:
+ *  `enterNode` кладёт в стек `node.children` тем же массивом, что лежит на
+ *  узле, поэтому владелец находится точно и без предположений об
+ *  уникальности подписей или идентификаторов. */
+function ownerOf(parent: MenuNode[], items: MenuNode[]): MenuNode | undefined {
+  return parent.find((n) => n.kind === 'branch' && n.children === items)
+}
+
+/**
+ * Идентификаторы ВЕТОК, через которые пользователь провалился от корня до
+ * текущего уровня: `[]` в корне, `['translate']` на уровне языков.
+ *
+ * Сам узел, который сейчас выбирают (и форма запроса, если она открыта), сюда
+ * НЕ входит — вызывающая сторона дописывает его id сама. Из этой пары и
+ * получается путь действия, который запоминает список недавних: действие это
+ * путь плюс параметр, а не один лист (см. recent-actions.ts).
+ */
+export function branchPathIds(state: MenuState): string[] {
+  const out: string[] = []
+  for (let i = 1; i < state.stack.length; i++) {
+    const owner = ownerOf(state.stack[i - 1], state.stack[i])
+    if (owner) out.push(owner.id)
+  }
+  return out
 }
 
 /** Вход в узел: branch — проваливается на уровень его детей; prompt —
