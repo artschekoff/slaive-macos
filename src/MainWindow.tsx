@@ -48,6 +48,7 @@ import {
   acceptApply,
   type ApplyState,
 } from './apply-state'
+import { panelGuard, panelTabStop, livePanelKey, nextFocusTarget } from './panel-focus'
 import {
   runAiAction,
   cancelAiAction,
@@ -192,14 +193,28 @@ export function MainWindow() {
   // действие сразу, либо открывается точно такой же список — подменю
   // Translate).
   const promptInputRef = useRef<HTMLInputElement | null>(null)
-  // Был ли фокус ВНУТРИ списка непосредственно перед тем, как уровень
-  // сменился (провал в Translate, возврат Back, завершение действия в
-  // корень). React убирает старый .mw-panel из дерева при смене key, а
-  // удаление сфокусированного узла НЕ порождает событие blur (стандартное
-  // поведение DOM) — ref, а не state, поэтому и остаётся true сквозь такое
-  // удаление, ровно то состояние, которое нужно эффекту ниже. Обычный уход
-  // фокуса (Tab на Paste, клик по полю текста) блюром сбрасывает его как
-  // положено.
+  // Панель Accept/Cancel/Working — третье и последнее место фокус-цикла
+  // окна: пока она на экране, списка нет вовсе, и без неё фокус оставался в
+  // <body> (см. nextFocusTarget в panel-focus.ts — там же довод, почему
+  // целью выбрана панель, а не кнопка на ней). Ref один на обе фазы: pending
+  // и proposed исключают друг друга, в стопке всегда ровно одна из этих
+  // панелей, и снимков с них не делается — та беда с ref'ом, что была у
+  // уровней меню, здесь невозможна по построению.
+  const applyPanelRef = useRef<HTMLDivElement | null>(null)
+  // Был ли фокус ВНУТРИ нижней области окна — списка, поля Ask AI или
+  // панели применения — непосредственно перед тем, как живая панель
+  // сменилась (провал в Translate, возврат Back, запуск действия,
+  // завершение действия в корень). React убирает старую .mw-panel из
+  // дерева, а удаление сфокусированного узла НЕ порождает событие blur
+  // (стандартное поведение DOM) — ref, а не state, поэтому и остаётся true
+  // сквозь такое удаление, ровно то состояние, которое нужно эффекту ниже.
+  // Обычный уход фокуса (Tab на Paste, клик по полю текста) блюром
+  // сбрасывает его как положено.
+  //
+  // Переход фокуса МЕЖДУ панелью и кнопкой внутри неё флаг не сбрасывает, и
+  // это не случайность: onFocus/onBlur в React — это focusin/focusout, они
+  // всплывают, поэтому за blur контейнера немедленно приходит focus от
+  // ребёнка, и итоговое значение остаётся true.
   const menuHadFocusRef = useRef(false)
   // Модальный слой «нет права на вставку» — тот же, что в оверлее, и по той
   // же причине: право одно на оба окна (Accessibility), отказ одинаков, и
@@ -976,6 +991,9 @@ export function MainWindow() {
     <>
       <input
         ref={live ? promptInputRef : null}
+        // Tab-стоп — только у живой панели (panelTabStop): поле ввода
+        // снимка иначе осталось бы остановкой Tab на те же 200мс.
+        tabIndex={panelTabStop(live)}
         className="mw-prompt-input"
         value={promptQuery}
         placeholder={menuState.prompt!.placeholder}
@@ -1031,7 +1049,10 @@ export function MainWindow() {
       className="action-grid action-grid-1"
       role="listbox"
       aria-label={currentLevelLabel(menuState) ?? 'Actions'}
-      tabIndex={0}
+      // Единственный tab-стоп уровня — и только пока панель живая
+      // (panelTabStop): у снимка уезжающей он был вторым, невидимым
+      // listbox'ом на пути Tab.
+      tabIndex={panelTabStop(live)}
       aria-activedescendant={
         columnItems.length > 0
           ? `mw-option-${depth}-${columnItems[selectedGridIndex].key}`
@@ -1187,19 +1208,50 @@ export function MainWindow() {
     setSelectedIndex(resetSelectionForLevel())
   }, [idlePanelKey, quickFingerprint])
 
-  // Возврат DOM-фокуса в меню после смены уровня, если он был там
-  // непосредственно перед сменой (см. menuHadFocusRef выше). Без этого
-  // стрелочная навигация обрывалась бы на каждом провале в Translate/Ask AI
-  // или возврате Back: React пересоздаёт .mw-panel по key (см. ниже), старый
-  // сфокусированный узел удаляется без blur, и фокус молча утекает в
-  // <body> — следующую стрелку уже некому поймать. Обычный уход фокуса
-  // (Tab на Paste, клик в поле текста) блюром сбрасывает флаг как положено,
-  // и это правило его не переопределяет.
+  // Ключ ЖИВОЙ панели стопки: не «какой уровень меню открыт», а «что сейчас
+  // стоит на его месте» — уровень, форма Ask AI или панель
+  // Working/Accept-Cancel (см. livePanelKey в panel-focus.ts). Эффект ниже
+  // висит на нём одном, и в этом вся разница с прежней зависимостью от
+  // idlePanelKey: уровень при действии из КОРНЯ не меняется, а панель —
+  // меняется, трижды.
+  const liveKey = livePanelKey(applyState.phase, idlePanelKey)
+
+  // Возврат DOM-фокуса в меню после подмены живой панели, если он был там
+  // непосредственно перед подменой (см. menuHadFocusRef выше). Без этого
+  // клавиатурный путь обрывался бы на каждом провале в Translate/Ask AI,
+  // возврате Back и на каждом запуске действия: React убирает старый
+  // .mw-panel из дерева (см. ниже), сфокусированный узел удаляется без
+  // blur, и фокус молча утекает в <body> — следующую стрелку уже некому
+  // поймать, Tab начинает обход с начала окна, Enter не достаётся никому.
+  // Обычный уход фокуса (Tab на Paste, клик в поле текста) блюром
+  // сбрасывает флаг как положено, и это правило его не переопределяет.
+  //
+  // Решение «куда именно» вынесено в nextFocusTarget (panel-focus.ts) — там
+  // и довод про панель применения; здесь остаётся только перевод фокуса.
+  // Зависимость одна, liveKey: showingPrompt входит в него префиксом ключа
+  // уровня (prompt: против level:), фаза — своей веткой, так что второй
+  // зависимости было бы нечего добавить.
   useEffect(() => {
-    if (!menuHadFocusRef.current) return
-    if (showingPrompt) promptInputRef.current?.focus()
-    else gridRef.current?.focus()
-  }, [idlePanelKey, showingPrompt])
+    switch (
+      nextFocusTarget({
+        menuHadFocus: menuHadFocusRef.current,
+        phase: applyState.phase,
+        showingPrompt,
+      })
+    ) {
+      case 'apply':
+        applyPanelRef.current?.focus()
+        break
+      case 'prompt':
+        promptInputRef.current?.focus()
+        break
+      case 'list':
+        gridRef.current?.focus()
+        break
+      case 'none':
+        break
+    }
+  }, [liveKey])
 
   // Уходящая панель уровня меню (для эффекта "старая уезжает влево/вправо,
   // новая приезжает с другой стороны" — бриф явно просит показывать ОБЕ
@@ -1433,8 +1485,19 @@ export function MainWindow() {
             grid-ячейку (см. styles.css) — обе видимы одновременно ровно то
             время, что требует бриф, без сдвига разметки под ними. */}
         <div className="mw-panel-stack" hidden={showHistory}>
+          {/* Каждая панель стопки объявляет свою достижимость сама
+              (panelGuard, см. panel-focus.ts): живая — обычный интерфейс,
+              уезжающий снимок — inert, картинка без мыши, фокуса и места в
+              дереве доступности. Без этого 200мс после КАЖДОЙ смены уровня
+              клик мог попасть по кнопке, которая уезжает за край, —
+              сработало бы то, во что человек не целился, с уровня, который
+              он уже покинул. */}
           {outgoingPanel && (
-            <div key={outgoingPanel.key} className={`mw-panel mw-exit-${outgoingPanel.direction}`}>
+            <div
+              key={outgoingPanel.key}
+              className={`mw-panel mw-exit-${outgoingPanel.direction}`}
+              {...panelGuard(false)}
+            >
               {outgoingPanel.node}
             </div>
           )}
@@ -1447,7 +1510,26 @@ export function MainWindow() {
               просто сверху текущего кадра, добавить тот же приём outgoing,
               что и у уровней меню выше. */}
           {applyState.phase === 'pending' && (
-            <div key="pending" className="mw-panel mw-apply-panel">
+            <div
+              key="pending"
+              className="mw-panel mw-apply-panel"
+              // Панель — цель фокуса, пока список снят с экрана (см.
+              // applyPanelRef выше). tabIndex={-1}: фокусируется кодом, но
+              // остановкой Tab не становится — следующие остановки Tab это
+              // Cancel здесь и Accept/Cancel в proposed, то есть ровно то,
+              // чем из этой фазы можно выйти.
+              ref={applyPanelRef}
+              tabIndex={-1}
+              role="group"
+              aria-label="Working"
+              onFocus={() => {
+                menuHadFocusRef.current = true
+              }}
+              onBlur={() => {
+                menuHadFocusRef.current = false
+              }}
+              {...panelGuard(true)}
+            >
               <span className="mw-spinner" aria-hidden="true" />
               <span className="mw-pending-label">Working…</span>
               {/* Cancel в pending рвёт запрос — и делает это по Escape тоже
@@ -1462,7 +1544,25 @@ export function MainWindow() {
           )}
 
           {applyState.phase === 'proposed' && (
-            <div key="proposed" className="mw-panel mw-apply-panel">
+            <div
+              key="proposed"
+              className="mw-panel mw-apply-panel"
+              // То же, что у pending выше: фокус живёт на панели, Accept и
+              // Cancel — следующие остановки Tab. Ref тот же (фазы
+              // исключают друг друга), ключ другой — панель пересоздаётся,
+              // поэтому фокус переносится заново.
+              ref={applyPanelRef}
+              tabIndex={-1}
+              role="group"
+              aria-label="AI proposal"
+              onFocus={() => {
+                menuHadFocusRef.current = true
+              }}
+              onBlur={() => {
+                menuHadFocusRef.current = false
+              }}
+              {...panelGuard(true)}
+            >
               {/* Два выхода из цикла и две подписанные клавиши. У Accept она
                   намеренно тугая (⇧⌘⏎, настройка acceptShortcut): принятие
                   затирает текст пользователя предложением модели, и вернуть
@@ -1481,7 +1581,11 @@ export function MainWindow() {
           )}
 
           {applyState.phase === 'idle' && (
-            <div key={idlePanelKey} className={`mw-panel mw-enter-${direction}`}>
+            <div
+              key={idlePanelKey}
+              className={`mw-panel mw-enter-${direction}`}
+              {...panelGuard(true)}
+            >
               {idlePanelNode}
             </div>
           )}
