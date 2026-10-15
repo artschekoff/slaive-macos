@@ -841,10 +841,18 @@ export function MainWindow() {
       ) {
         let moved = true
         switch (e.key) {
+          // Чипы текут по горизонтали с переносом, поэтому ←/→ — те же
+          // шаги по порядку пунктов, что ↓/↑ (порядок один, линейный).
+          // Вертикальная пара осталась: ряд чипов переносится, и «вниз» по
+          // привычке столбца не должно умереть. В NORMAL стрелки и раньше
+          // принадлежали списку (см. arrow-routing.ts) — hjkl у редактора
+          // никто не отбирает.
           case 'ArrowDown':
+          case 'ArrowRight':
             setSelectedIndex((i) => moveSelectionDown(i, columnItems.length))
             break
           case 'ArrowUp':
+          case 'ArrowLeft':
             setSelectedIndex((i) => moveSelectionUp(i, columnItems.length))
             break
           case 'Home':
@@ -1072,10 +1080,17 @@ export function MainWindow() {
         // их глобально нельзя. Голые клавиши, без модификаторов: ⌘K и
         // прочие хоткеи действий уже обработаны глобальным перехватчиком,
         // но тот не гасит всплытие — без проверки ⌘K двигал бы выбор.
-        if ((e.key === 'j' || e.key === 'k') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        // l/h добавлены к j/k с переходом на чипы: пункты текут по
+        // горизонтали, и «вправо/влево» — естественная пара движений; все
+        // четыре шагают по одному линейному порядку. Здесь фокус УЖЕ на
+        // списке, у редактора эти буквы не отбираются.
+        if (
+          (e.key === 'j' || e.key === 'k' || e.key === 'l' || e.key === 'h') &&
+          !e.metaKey && !e.ctrlKey && !e.altKey
+        ) {
           e.preventDefault()
           setSelectedIndex((i) =>
-            e.key === 'j'
+            e.key === 'j' || e.key === 'l'
               ? moveSelectionDown(i, columnItems.length)
               : moveSelectionUp(i, columnItems.length)
           )
@@ -1083,10 +1098,12 @@ export function MainWindow() {
         }
         switch (e.key) {
           case 'ArrowDown':
+          case 'ArrowRight':
             e.preventDefault()
             setSelectedIndex((i) => moveSelectionDown(i, columnItems.length))
             return
           case 'ArrowUp':
+          case 'ArrowLeft':
             e.preventDefault()
             setSelectedIndex((i) => moveSelectionUp(i, columnItems.length))
             return

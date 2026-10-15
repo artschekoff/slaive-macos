@@ -1492,6 +1492,70 @@ button.primary {
   background: rgba(255, 255, 255, 0.12);
 }
 
+/* ===== Меню действий чипами (переделка по скриншоту) =====
+   Столбец из полноширинных рядов занимал больше половины окна и душил поле
+   текста — теперь те же пункты (и тот же role="listbox" со всей
+   клавиатурной механикой: стрелки, ⌘-хоткеи, aria-activedescendant)
+   раскладываются компактными чипами-пилюлями с переносом по ширине. DOM и
+   состояние не менялись вовсе — это ПЕРЕОДЕВАНИЕ той же сетки, поэтому
+   правила ниже бьют селектором с [role='listbox'] (специфичность выше
+   грид-правил .action-grid-1 и укрупнения .main-window .action-grid
+   button) и не трогают остальные сетки окна: Send, Accept/Cancel и кнопки
+   оверлея остаются как были. Подменю Translate — те же чипы на месте
+   прежних, со слайдом уровня и ← Back в полосе над ними: «выпадение»
+   списка вниз отдельным слоем стоило бы второй якорной разметки ради того
+   же результата. */
+.main-window .action-grid[role='listbox'] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.main-window .action-grid[role='listbox'] button {
+  width: auto;
+  padding: 7px 14px;
+  font-size: 13px;
+  border-radius: 999px;
+}
+
+/* Бейдж в чипе — обычного размера: укрупнение шло в паре с 14px кнопками
+   столбца. */
+.main-window .action-grid[role='listbox'] .shortcut-badge {
+  margin-left: 6px;
+  font-size: 11px;
+}
+
+/* Быстрый вызов — чип с подкрашенной заливкой: в общем потоке переносов
+   разделительной линии больше нет, недавнее от действия отличает оттенок
+   (и крестик). Длинная переменная подпись обрезается многоточием на
+   пределе ширины чипа, а не раздувает его на всю строку. */
+.mw-recent {
+  display: inline-flex;
+  max-width: 300px;
+  min-width: 0;
+}
+
+.main-window .action-grid[role='listbox'] button.mw-recent-run {
+  width: auto;
+  max-width: 100%;
+  padding-right: 30px;
+  background: rgba(10, 132, 255, 0.14);
+}
+
+.main-window .action-grid[role='listbox'] button.mw-recent-run:not(:disabled):hover {
+  background: rgba(10, 132, 255, 0.22);
+}
+
+/* Линия-разделитель и её отступ — артефакты столбца, в потоке чипов им
+   делать нечего. */
+.main-window .action-grid[role='listbox'] button.mw-after-recent {
+  margin-top: 0;
+}
+
+.main-window .action-grid[role='listbox'] button.mw-after-recent::before {
+  content: none;
+}
+
 /* Тот же паттерн и та же подсветка — для сетки истории (см. HistoryView.tsx
    и history-grid-nav.ts). ОТДЕЛЬНЫЕ правила, а не общий селектор на оба
    контейнера: плитка — не одна кнопка, а .history-tile с ДВУМЯ (открыть +
@@ -1521,7 +1585,13 @@ button.primary {
   position: relative;
   flex: 1;
   display: flex;
-  min-height: 0; /* тот же приём, что min-width:0 у .transcript-field — иначе flex-элемент не сжимается ниже min-content высоты содержимого */
+  /* Был 0 («сжимайся сколько угодно», как min-width:0 у .transcript-field)
+     — и меню-столбец дожимал поле текста до полутора строк. Чипы вернули
+     место сами по себе, пол страхует от повторения: ниже ~6 строк поле не
+     ужмётся, дальше окно начинает прокручиваться (overflow-y на
+     .main-window). Длинный транскрипт при этом по-прежнему скроллится
+     внутри поля: пол много меньше его min-content высоты. */
+  min-height: 140px;
 }
 
 .mw-editor-row .transcript-field { flex: 1; }
