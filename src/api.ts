@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { AiSettings } from './ai.ts'
+import type { DictorRole } from './dictor-roles.ts'
 import type { RecentAction } from './recent-actions.ts'
 
 export type Settings = {
@@ -97,6 +98,13 @@ export type Settings = {
   /** User's term list, fed to whisper's `initial_prompt` (see
    *  `whisper::initial_prompt`). Empty = the parameter isn't passed at all. */
   dictionary: string
+  /** Dictor roles for the optional AI pass over the transcript — name +
+   *  prompt each, edited in Settings (see dictor-roles.ts). Empty = the
+   *  feature isn't set up and the panel shows no role selector. */
+  dictorRoles: DictorRole[]
+  /** id of the active role, or `null` = editing off (the default): the
+   *  whisper text goes to the user untouched and nothing hits the network. */
+  dictorRole: string | null
 }
 
 export type SettingsResponse = Settings & {
@@ -263,6 +271,13 @@ export const runAiAction = (system: string, user: string) =>
  *  интерфейс, а HTTP доигрывал бы в фоне, списывая токены за ответ, который
  *  никто не увидит. */
 export const cancelAiAction = () => invoke<void>('cancel_ai_action')
+
+/** Switches the active dictor role from the panel's selector — a narrow
+ *  command instead of a full `saveSettings`: the panel has no settings form,
+ *  and one changed field shouldn't ride through hotkey re-registration.
+ *  `null` turns the AI pass off. Persists and emits `settings:changed`. */
+export const setDictorRole = (role: string | null) =>
+  invoke<void>('set_dictor_role', { role })
 
 /** Право на отправку синтетических нажатий (Accessibility) — тот же
  *  источник правды, что использует paste_text перед реальной попыткой.

@@ -31,6 +31,7 @@ import {
   type PromptBudget,
 } from './api'
 import { effectiveBaseUrl, isSelectable, emptyProviderConfig, type AiProviderInfo } from './ai'
+import type { DictorRole } from './dictor-roles'
 import { SECTIONS, FIRST_SECTION, type SectionId } from './settings-sections'
 import {
   DEFAULT_TRANSLATE_LANGUAGES,
@@ -290,6 +291,22 @@ export function Settings() {
       },
     })
   }
+
+  // Правка одной роли в списке — id неизменен, правятся имя/промпт.
+  const patchRole = (id: string, p: Partial<DictorRole>) =>
+    patch({ dictorRoles: s.dictorRoles.map((r) => (r.id === id ? { ...r, ...p } : r)) })
+
+  const addRole = () =>
+    patch({ dictorRoles: [...s.dictorRoles, { id: crypto.randomUUID(), name: '', prompt: '' }] })
+
+  // Удаление активной роли гасит и выбор: указатель на несуществующую роль
+  // не должен осесть в settings.json — панель бы его молча игнорировала
+  // (см. findRole), но селектор показывал бы пустоту вместо «No role».
+  const removeRole = (id: string) =>
+    patch({
+      dictorRoles: s.dictorRoles.filter((r) => r.id !== id),
+      ...(s.dictorRole === id ? { dictorRole: null } : {}),
+    })
 
   const onSave = async () => {
     setSaveError('')
@@ -989,6 +1006,50 @@ export function Settings() {
         {DEFAULT_TRANSLATE_LANGUAGES}.
       </p>
       <p className="hint">Translate will offer: {translateMenuPreview}</p>
+
+      {/* Роли диктора — в AI, а не в Recognition: whisper они не касаются
+          вовсе, это второй проход ПО УЖЕ РАСПОЗНАННОМУ тексту через того же
+          провайдера, что и действия главного окна, — ровно подпись раздела. */}
+      <h2>Dictor roles</h2>
+      <p className="hint">
+        A role tells the AI who is speaking, so it can fix what whisper misheard — "I'm a
+        programmer, expect git, Kubernetes, deploy" brings the terms back. When a role is active
+        (picked in the panel), every transcript takes one extra round trip to the provider above
+        before you see the final text. No role active — nothing is sent anywhere, exactly as
+        before.
+      </p>
+      {s.dictorRoles.map((role) => (
+        <div key={role.id} className="role-card">
+          <label>
+            Role name
+            <div className="row-with-button">
+              <input
+                value={role.name}
+                placeholder="e.g. Programmer"
+                onChange={(e) => patchRole(role.id, { name: e.target.value })}
+              />
+              <button type="button" onClick={() => removeRole(role.id)}>
+                Delete
+              </button>
+            </div>
+          </label>
+          <label>
+            Prompt
+            <textarea
+              className="dictionary"
+              rows={3}
+              value={role.prompt}
+              placeholder="Who is speaking and what terms to expect — e.g. I'm a programmer; fix misheard tech terms like git, Kubernetes, endpoint."
+              onChange={(e) => patchRole(role.id, { prompt: e.target.value })}
+            />
+          </label>
+        </div>
+      ))}
+      <div className="download">
+        <button type="button" onClick={addRole}>
+          Add role
+        </button>
+      </div>
     </>
   )
 

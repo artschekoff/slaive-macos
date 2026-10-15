@@ -29,6 +29,8 @@ export type SettingKey =
   | 'acceptShortcut'
   | 'ai'
   | 'translateLanguages'
+  | 'dictorRoles'
+  | 'dictorRole'
   | 'windowOpacity'
 
 export type SectionId =
@@ -122,7 +124,10 @@ export const SECTIONS: readonly Section[] = [
     id: 'ai',
     title: 'AI',
     summary: 'What happens to the text after it is recognized.',
-    settings: ['ai', 'translateLanguages'],
+    // dictorRole (активная роль) правится селектором в панели, но живёт
+    // в том же разделе, что и список ролей: это тоже «что происходит с
+    // текстом после распознавания», и раздел — место, где её ищут глазами.
+    settings: ['ai', 'translateLanguages', 'dictorRoles', 'dictorRole'],
   },
   {
     id: 'appearance',

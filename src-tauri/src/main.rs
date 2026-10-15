@@ -65,6 +65,7 @@ fn main() {
             commands::test_ai_connection,
             commands::run_ai_action,
             commands::cancel_ai_action,
+            commands::set_dictor_role,
             commands::check_accessibility_permission,
             commands::open_settings_window,
             commands::follow_to_main_window,

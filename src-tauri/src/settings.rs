@@ -25,6 +25,18 @@ impl Default for ProviderConfig {
     }
 }
 
+/// Роль диктора: имя для селектора в панели и промпт, которым ИИ правит
+/// расшифровку под эту роль («я программист — почини термины»). id —
+/// UUID, который выдаёт фронтенд при создании; имя не идентификатор,
+/// его можно переименовывать, не теряя выбор активной роли.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DictorRole {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+}
+
 /// Настройки ИИ-слоя. У каждого провайдера своя запись в `providers`,
 /// ключ — id провайдера (см. `ai::PROVIDERS`) — переключение между ними не
 /// затирает соседние настройки, каждая пара модель+адрес живёт отдельно.
@@ -211,6 +223,13 @@ pub struct Settings {
     /// когда поля в файле нет: очищенный пользователем словарь остаётся
     /// очищенным и сидом не перезаписывается.
     pub dictionary: String,
+    /// Роли диктора для ИИ-правки расшифровки. Пустой список — функция
+    /// не настроена, селектор в панели не показывается вовсе.
+    pub dictor_roles: Vec<DictorRole>,
+    /// id активной роли. `None` — правка выключена: whisper-текст уходит
+    /// пользователю как есть, ни одного сетевого запроса не происходит.
+    /// Это и дефолт: функция строго opt-in (см. бриф — «опционально»).
+    pub dictor_role: Option<String>,
 }
 
 /// Сид словаря: английские термины, которые русскоговорящий разработчик
@@ -315,6 +334,127 @@ EKS\n\
 Fargate\n\
 CloudWatch";
 
+/// Сид ролей диктора — типовые профессии со специфичной терминологией,
+/// которую whisper чаще всего перевирает. Тот же механизм, что у сида
+/// словаря: дефолт serde подставляется только когда поля НЕТ в файле —
+/// отредактированный или очищенный пользователем список не воскресает.
+///
+/// id — фиксированные слаги с префиксом "seed-", а не UUID: сид обязан
+/// быть детерминированным (один и тот же файл настроек после каждого
+/// запуска), а столкновение с ролями пользователя исключено — фронтенд
+/// выдаёт новым ролям crypto.randomUUID().
+///
+/// Промпты на английском, как и системная рамка (см. buildRoleSystemPrompt
+/// в src/dictor-roles.ts): рамка и вкладыш читаются моделью как один текст.
+/// Каждый промпт называет, КТО говорит и КАКИЕ термины ожидать, — ровно те
+/// два сигнала, по которым модель чинит перевранное слово.
+fn seed_role(id: &str, name: &str, prompt: &str) -> DictorRole {
+    DictorRole {
+        id: format!("seed-{id}"),
+        name: name.to_string(),
+        prompt: prompt.to_string(),
+    }
+}
+
+pub fn default_dictor_roles() -> Vec<DictorRole> {
+    vec![
+        seed_role(
+            "programmer",
+            "Programmer",
+            "The speaker is a software developer. Expect programming and tooling terms: \
+             git (commit, merge, rebase, pull request), backend, frontend, endpoint, \
+             payload, deploy, rollback, refactoring, debugging, framework names (React, \
+             TypeScript, Rust), databases, Docker, Kubernetes, CI/CD. Variable names and \
+             code identifiers may appear mid-sentence — keep their exact spelling.",
+        ),
+        seed_role(
+            "architect",
+            "Software Architect",
+            "The speaker is a software architect. Expect system design vocabulary: \
+             microservices, monolith, event-driven, message broker, API gateway, \
+             load balancer, scalability, latency, throughput, consistency, caching, \
+             sharding, domain-driven design, bounded context, coupling, cohesion, \
+             trade-off, technical debt, SLA, fault tolerance.",
+        ),
+        seed_role(
+            "project-manager",
+            "Project Manager",
+            "The speaker is a project manager. Expect delivery and process terms: \
+             sprint, backlog, standup, retrospective, roadmap, milestone, deadline, \
+             stakeholder, scope, estimate, velocity, burndown, Jira, epic, user story, \
+             acceptance criteria, risk, dependency, OKR, KPI, release plan.",
+        ),
+        seed_role(
+            "devops",
+            "DevOps Engineer",
+            "The speaker is a DevOps / SRE engineer. Expect infrastructure terms: \
+             pipeline, deployment, container, Kubernetes, Helm, Terraform, Ansible, \
+             monitoring, alerting, Prometheus, Grafana, incident, postmortem, SLO, SLI, \
+             autoscaling, ingress, namespace, secret, cloud providers (AWS, GCP, Azure) \
+             and their services (EC2, S3, Lambda, Cloud Run, BigQuery).",
+        ),
+        seed_role(
+            "data-scientist",
+            "Data Scientist",
+            "The speaker is a data scientist / ML engineer. Expect data and ML terms: \
+             dataset, feature, model, training, inference, overfitting, regression, \
+             classification, neural network, transformer, embedding, fine-tuning, \
+             hyperparameter, pipeline, pandas, NumPy, PyTorch, SQL, A/B test, metric, \
+             precision, recall, baseline.",
+        ),
+        seed_role(
+            "designer",
+            "Product Designer",
+            "The speaker is a product / UX designer. Expect design vocabulary: \
+             wireframe, mockup, prototype, user flow, usability, accessibility, \
+             design system, component, typography, grid, spacing, contrast, Figma, \
+             breakpoint, responsive, onboarding, empty state, call to action, \
+             user research, heuristic evaluation.",
+        ),
+        seed_role(
+            "marketer",
+            "Marketer",
+            "The speaker is a marketing specialist. Expect marketing terms: campaign, \
+             funnel, conversion, CTR, CPC, CPA, ROI, retention, churn, engagement, \
+             lead generation, landing page, SEO, SEM, A/B test, audience segmentation, \
+             brand awareness, positioning, copy, CRM, newsletter, social media channels.",
+        ),
+        seed_role(
+            "sales",
+            "Sales Manager",
+            "The speaker is a sales manager. Expect sales vocabulary: pipeline, lead, \
+             prospect, qualification, discovery call, demo, proposal, quota, forecast, \
+             close rate, upsell, cross-sell, churn, renewal, CRM (Salesforce, HubSpot), \
+             deal stage, objection handling, pricing tier, contract, procurement.",
+        ),
+        seed_role(
+            "lawyer",
+            "Lawyer",
+            "The speaker is a lawyer. Expect legal terminology: contract, clause, \
+             liability, indemnification, jurisdiction, compliance, due diligence, \
+             intellectual property, NDA, arbitration, litigation, plaintiff, defendant, \
+             statute, regulation, GDPR, terms of service, breach, damages, settlement.",
+        ),
+        seed_role(
+            "physician",
+            "Physician",
+            "The speaker is a medical professional. Expect clinical terminology: \
+             diagnosis, symptom, anamnesis, prognosis, chronic, acute, dosage, \
+             contraindication, drug names, anatomical terms, lab values, MRI, CT, ECG, \
+             blood pressure, therapy, remission, referral, ICD codes. Keep drug names \
+             and dosages exactly as spelled.",
+        ),
+        seed_role(
+            "finance",
+            "Financial Analyst",
+            "The speaker is a finance professional. Expect financial terms: revenue, \
+             EBITDA, margin, cash flow, balance sheet, P&L, forecast, budget, variance, \
+             CAPEX, OPEX, valuation, equity, liability, amortization, depreciation, \
+             ROI, IRR, liquidity, portfolio, hedge, interest rate, fiscal quarter.",
+        ),
+    ]
+}
+
 /// Дефолтный хоткей захвата — Ctrl+Cmd+Space. Функция, а не константа,
 /// потому что `Default for Settings` ниже собирает `String`, и это её
 /// единственный потребитель: `#[serde(default)]` на всей структуре уже
@@ -405,6 +545,13 @@ impl Default for Settings {
             high_pass_filter: true,
             window_opacity: DEFAULT_WINDOW_OPACITY,
             dictionary: DEFAULT_DICTIONARY.to_string(),
+            // Сид типовых профессий (см. default_dictor_roles) — как у
+            // словаря: подставляется только при отсутствии поля в файле,
+            // правки и очистка пользователя не перезаписываются.
+            dictor_roles: default_dictor_roles(),
+            // Активной роли по умолчанию НЕТ: правка — это сетевой запрос с
+            // текстом речи на каждую диктовку, такое включают только явно.
+            dictor_role: None,
         }
     }
 }
@@ -736,9 +883,65 @@ mod tests {
             high_pass_filter: false,
             window_opacity: 0.75,
             dictionary: "React\nTypeScript".into(),
+            dictor_roles: vec![DictorRole {
+                id: "11111111-2222-3333-4444-555555555555".into(),
+                name: "Программист".into(),
+                prompt: "Я программист, почини термины.".into(),
+            }],
+            dictor_role: Some("11111111-2222-3333-4444-555555555555".into()),
         };
         save(&dir, &s).unwrap();
         assert_eq!(load(&dir), s);
+    }
+
+    /// Настройки, сохранённые до появления ролей диктора, не должны
+    /// переставать загружаться — та же гарантия, что у VAD, Paste/Copy и
+    /// словаря выше: отсутствующее поле берёт сид, активная роль остаётся
+    /// выключенной (правка — сетевой запрос, такое включают только явно),
+    /// соседи читаются как раньше.
+    #[test]
+    fn settings_without_dictor_roles_fall_back_to_the_seed() {
+        let dir = tmp();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"hotkey":"Alt+Space","language":"ru"}"#,
+        )
+        .unwrap();
+        let s = load(&dir);
+        assert_eq!(s.dictor_roles, default_dictor_roles());
+        assert_eq!(s.dictor_role, None);
+        assert_eq!(s.language, "ru");
+    }
+
+    /// Очищенный список ролей остаётся очищенным: сид подставляется только
+    /// при ОТСУТСТВИИ поля — тот же инвариант, что у словаря и языков
+    /// перевода выше. Без этого удаление ненужных ролей жило бы до
+    /// перезапуска.
+    #[test]
+    fn cleared_dictor_roles_survive_roundtrip() {
+        let mut s = Settings::default();
+        s.dictor_roles = Vec::new();
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert!(back.dictor_roles.is_empty());
+    }
+
+    /// Сид ролей обязан быть пригодным как есть: id уникальны (селектор и
+    /// активная роль ищут по id), имена и промпты не пусты (пустая роль в
+    /// селекторе — мусор, пустой промпт — бессмысленный сетевой запрос),
+    /// активной роли среди них нет — функция строго opt-in.
+    #[test]
+    fn seed_roles_are_unique_named_and_prompted() {
+        let roles = default_dictor_roles();
+        assert!(!roles.is_empty());
+        let mut ids = std::collections::BTreeSet::new();
+        for r in &roles {
+            assert!(ids.insert(r.id.clone()), "дублирующийся id в сиде: {}", r.id);
+            assert!(r.id.starts_with("seed-"), "id сида без префикса: {}", r.id);
+            assert!(!r.name.trim().is_empty(), "роль {} без имени", r.id);
+            assert!(!r.prompt.trim().is_empty(), "роль {} без промпта", r.id);
+        }
+        assert_eq!(Settings::default().dictor_role, None);
     }
 
     /// Настройки, сохранённые до появления выбора устройства и словаря, не

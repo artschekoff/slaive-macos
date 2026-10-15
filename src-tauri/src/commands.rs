@@ -488,6 +488,37 @@ pub fn cancel_ai_action(state: State<'_, AppState>) {
     state.ai_cancel.notify_waiters();
 }
 
+/// Переключает активную роль диктора — узкая команда вместо полного
+/// `save_settings`: селектор живёт в панели, у которой нет формы настроек,
+/// и прогонять смену одного поля через перерегистрацию хоткеев (и их
+/// возможные отказы) не за что. `None` — правка выключена. Неизвестный id
+/// — отказ, а не молчаливая запись: селектор на фронте мог отстать от
+/// только что отредактированного списка ролей.
+#[tauri::command]
+pub fn set_dictor_role(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    role: Option<String>,
+) -> Result<(), String> {
+    let settings = {
+        let mut s = state.settings.lock().unwrap();
+        if let Some(id) = &role {
+            if !s.dictor_roles.iter().any(|r| &r.id == id) {
+                return Err("That role doesn't exist anymore. Pick another in Settings.".to_string());
+            }
+        }
+        s.dictor_role = role;
+        s.clone()
+    };
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+    // То же событие, что у save_settings: панель — единственный потребитель
+    // этого поля, и она же его и поменяла, но событие держит её state в
+    // одном потоке правды с диском (и с будущими слушателями).
+    let _ = app.emit_to("overlay", "settings:changed", settings);
+    Ok(())
+}
+
 /// Право на отправку синтетических нажатий — тот же самый источник правды,
 /// что использует `paste_text` перед реальной попыткой (см.
 /// `macos::has_accessibility_permission`). Фронтенд зовёт эту команду ДО

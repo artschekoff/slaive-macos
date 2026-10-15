@@ -72,7 +72,7 @@ test('распределение настроек по разделам — ро
     'acceptShortcut',
   ])
   // AI — обработка уже готового текста: провайдер и то, что у него просят.
-  assert.deepEqual(byId('ai'), ['ai', 'translateLanguages'])
+  assert.deepEqual(byId('ai'), ['ai', 'translateLanguages', 'dictorRoles', 'dictorRole'])
 })
 
 // Языки перевода — цели ИИ-действия, а язык whisper — вход распознавания.
@@ -129,6 +129,8 @@ test('каждая хранимая настройка доступна хотя
     highPassFilter: true,
     windowOpacity: 0.9,
     dictionary: '',
+    dictorRoles: [],
+    dictorRole: null,
   }
   const stored = Object.keys(sample).sort()
   const placed = [...ALL_SETTING_KEYS].sort()

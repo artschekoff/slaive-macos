@@ -16,6 +16,8 @@ import {
   openSettingsWindow,
   pasteText,
   retranscribe,
+  runAiAction,
+  setDictorRole,
   setOverlayHasText,
   startRecording,
   stopRecording,
@@ -38,6 +40,7 @@ import {
   type VimMode,
 } from './transcript-editor'
 import { resampleLevels } from './levels'
+import { buildRoleSystemPrompt, findRole, type DictorRole } from './dictor-roles'
 import micIcon from './assets/mic.png'
 
 type Phase = 'idle' | 'recording' | 'transcribing' | 'ready' | 'error'
@@ -178,11 +181,26 @@ const FORCED_LANGUAGES: { value: ForcedLanguage; label: string }[] = [
   { value: 'en', label: 'English' },
 ]
 
+// Хоткей, раскрывающий селектор «Redo as» с клавиатуры: дальше стрелки ходят
+// по языкам, Enter запускает повторную расшифровку, Escape закрывает без неё
+// — всё это штатное поведение ОТКРЫТОГО нативного списка, панели здесь
+// делать нечего. Захардкожен, как Cmd+1..9 у подменю главного окна, а не
+// хранится в настройках: это навигация по уже видимому элементу, а не
+// действие. Cmd+R безопасен по той же причине, что Cmd+C у Copy: в
+// грамматике Vim модификатора Cmd не бывает, у редактора ничего не отбирается.
+const REDO_AS_SHORTCUT = 'Super+KeyR'
+
 // Подпись строки с Undo — та же роль и тот же приём, что у HISTORY_NOTICE/
 // NEW_TEXT_NOTICE в главном окне (см. MainWindow.tsx): замена задумана, но
 // «задумано» не оправдывает молчаливую потерю правок, которые человек внёс
 // руками. Объясняем ровно одно — откуда взялся текст, который теперь в поле.
 const RETRANSCRIBE_NOTICE = 'Re-transcribed. The text that was here has been replaced.'
+
+// Та же плашка для второй причины замены — ИИ-правки под роль диктора. Undo
+// возвращает сырой whisper-текст: правки руками за время запроса сюда попасть
+// не могут, при изменившемся документе правка не применяется вовсе (см.
+// проверку «документ не менялся» в refineWithRole).
+const ROLE_EDIT_NOTICE = 'Polished by the dictor role. The raw transcript has been replaced.'
 
 export function Overlay() {
   const [phase, setPhase] = useState<Phase>('idle')
@@ -263,6 +281,28 @@ export function Overlay() {
   // стало бы нечем. Потеря транскрипта из-за неудачной повторной попытки
   // хуже, чем неверный язык.
   const [retranscribeError, setRetranscribeError] = useState('')
+  // Чем объяснять плашку Undo: повторной расшифровкой или ИИ-правкой под
+  // роль. Отдельное состояние рядом с `replaced`, а не второй механизм Undo:
+  // снимок один и тот же, различается только подпись.
+  const [replacedNotice, setReplacedNotice] = useState(RETRANSCRIBE_NOTICE)
+  // Роли диктора и активная роль — из настроек; те же два пути обновления,
+  // что у хоткеев панели (getSettings на mount + settings:changed).
+  const [roles, setRoles] = useState<DictorRole[]>([])
+  const [activeRoleId, setActiveRoleId] = useState<string | null>(null)
+  // Идёт ИИ-правка под роль. Не фаза: текст уже на экране и работает
+  // (Paste/Copy живые), правка — улучшение поверх, как у retranscribing.
+  const [refining, setRefining] = useState(false)
+  // ИИ-правка не удалась. Отдельно от error/phase по той же причине, что
+  // retranscribeError: сырой текст цел, и фаза ошибки тут соврала бы.
+  const [refineError, setRefineError] = useState('')
+  // Снимки для обработчика transcript, навешенного один раз на mount — тот
+  // же приём, что pasteShortcutRef/copyShortcutRef ниже.
+  const rolesRef = useRef<DictorRole[]>([])
+  const activeRoleIdRef = useRef<string | null>(null)
+  // Длительность последней расшифровки — нужна ИИ-правке, чтобы обновить ту
+  // же плитку журнала (updateHistoryEntry требует duration, а правка
+  // случается позже события, которое её принесло).
+  const lastDurationRef = useRef(0)
   const [permissionPane, setPermissionPane] = useState<PrivacyPane | null>(null)
   // Модальный слой "нет права на вставку" — показывается СРАЗУ по нажатию
   // Paste, если право уже отсутствует (см. onPaste), а не после круга
@@ -314,20 +354,99 @@ export function Overlay() {
   }, [copyShortcut])
 
   useEffect(() => {
-    getSettings().then((s: Settings) => {
+    const apply = (s: Settings) => {
       setPasteShortcut(s.pasteShortcut)
       setCopyShortcut(s.copyShortcut)
       setFollowShortcut(s.followShortcut)
-    })
-    const un = listen<Settings>('settings:changed', (e) => {
-      setPasteShortcut(e.payload.pasteShortcut)
-      setCopyShortcut(e.payload.copyShortcut)
-      setFollowShortcut(e.payload.followShortcut)
-    })
+      setRoles(s.dictorRoles)
+      rolesRef.current = s.dictorRoles
+      setActiveRoleId(s.dictorRole)
+      activeRoleIdRef.current = s.dictorRole
+    }
+    getSettings().then(apply)
+    const un = listen<Settings>('settings:changed', (e) => apply(e.payload))
     return () => {
       un.then((f) => f())
     }
   }, [])
+
+  // ИИ-правка транскрипта под активную роль диктора: whisper уже отработал,
+  // текст на экране — поверх него один запрос к провайдеру (тот же
+  // run_ai_action, что у действий главного окна), и результат заменяет сырой
+  // текст с Undo-плашкой. Роли нет — ни одного сетевого вызова, функция
+  // выходит сразу: правка строго opt-in.
+  //
+  // Сырой текст показывается СРАЗУ, а не держится до ответа провайдера:
+  // правка — секунды сети поверх уже готового результата, и прятать готовый
+  // текст за спиннером значило бы сделать каждую диктовку медленнее на эти
+  // секунды даже там, где правка ничего не изменит.
+  //
+  // Читает роли через ref-ы: вызывается и из обработчика transcript,
+  // навешенного один раз на mount. roleOverride — для смены роли селектором
+  // на уже готовом тексте, когда ref мог ещё не обновиться.
+  const refineWithRole = (roleOverride?: DictorRole) => {
+    const role = roleOverride ?? findRole(rolesRef.current, activeRoleIdRef.current)
+    if (!role) return
+    const view = viewRef.current
+    if (!view) return
+    const raw = view.state.doc.toString()
+    if (!raw.trim()) return
+    setRefining(true)
+    setRefineError('')
+    runAiAction(buildRoleSystemPrompt(role), raw)
+      .then((fixed) => {
+        const v = viewRef.current
+        // Пока ждали ответ, документ сменился — новая запись, правка руками,
+        // другая правка. Класть поверх него устаревший результат нельзя:
+        // проверка по содержимому, а не по фазе, закрывает все пути сразу.
+        if (!v || v.state.doc.toString() !== raw) return
+        if (fixed === raw) return // модель ничего не поменяла — и плашка Undo соврала бы
+        resetEditorContent(v, fixed)
+        setReplaced(raw)
+        setReplacedNotice(ROLE_EDIT_NOTICE)
+        v.focus()
+        // Журнал: плитка сессии держит правленый текст — иначе починка
+        // терминов жила бы только до закрытия панели (тот же довод, что у
+        // повторной расшифровки).
+        historyWriteRef.current = historyWriteRef.current
+          .then((entryId) =>
+            entryId !== null
+              ? updateHistoryEntry(entryId, fixed, lastDurationRef.current)
+              : addHistoryEntry(fixed, lastDurationRef.current)
+          )
+          .catch((err) => {
+            console.error('история: ИИ-правка не сохранена:', String(err))
+            return null
+          })
+      })
+      .catch((e) => {
+        // Текст в поле не тронут: его заменяет только ветка успеха выше.
+        setRefineError(String(e))
+      })
+      .finally(() => setRefining(false))
+  }
+
+  // Смена активной роли — постоянное предпочтение (в отличие от разового
+  // «Redo as» у языка), уходит на диск узкой командой. Выбор применяется к
+  // уже готовому тексту сразу: человек смотрит на расшифровку с перевранными
+  // терминами и выбирает роль именно ради неё, ждать следующей записи — не то.
+  const onRoleChange = (id: string) => {
+    const roleId = id || null
+    const prev = activeRoleIdRef.current
+    setActiveRoleId(roleId)
+    activeRoleIdRef.current = roleId
+    setDictorRole(roleId).catch((e) => {
+      // Бэкенд отказал (роль только что удалили в настройках) — откат к
+      // прежнему значению, не молчаливое расхождение селектора с диском.
+      setActiveRoleId(prev)
+      activeRoleIdRef.current = prev
+      setRefineError(String(e))
+    })
+    if (roleId && phase === 'ready' && !refining) {
+      const role = findRole(rolesRef.current, roleId)
+      if (role) refineWithRole(role)
+    }
+  }
 
   // Скользящий максимум текущей записи — держит только высоту дорожки, не
   // должен сам по себе вызывать ре-рендер (это делает `levels`). Живёт
@@ -341,6 +460,10 @@ export function Overlay() {
   // на смену Vim-режима — общий путь с главным окном, см. transcript-editor.ts.
   const editorContainerRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
+
+  // Селектор «Redo as» — чтобы Cmd+R мог раскрыть его из глобального
+  // обработчика клавиш. Ref, а не состояние: элемент нужен только там.
+  const langForceRef = useRef<HTMLSelectElement>(null)
 
   // Корень панели — источник измерения для авто-высоты окна (часть 2, см.
   // эффект ResizeObserver ниже).
@@ -489,6 +612,7 @@ export function Overlay() {
         // предложение вернуть его теряет смысл вместе с началом записи.
         setReplaced(null)
         setRetranscribeError('')
+        setRefineError('')
         // PCM всегда перечитываем заново: при дозаписи бэкенд склеил новый
         // фрагмент с прежним, и закэшированная тут копия устарела ровно так
         // же, как при обычной записи.
@@ -610,6 +734,10 @@ export function Overlay() {
         // принудительный — принуждение бывает только через retranscribe.
         setLanguage(e.payload.language ? { name: e.payload.language, forced: false } : null)
         setPhase('ready')
+        // ИИ-правка под активную роль — поверх уже показанного текста, см.
+        // refineWithRole. Роль не выбрана — вызов выходит сразу, без сети.
+        lastDurationRef.current = e.payload.durationSecs
+        refineWithRole()
       }),
       listen<string>('rec:device-fallback', (e) => {
         setDeviceNotice(e.payload)
@@ -796,7 +924,13 @@ export function Overlay() {
         // Пустое (или пробельное) прежнее содержимое возвращать незачем —
         // тот же порог, что в главном окне.
         setReplaced(previous.trim() ? previous : null)
+        setReplacedNotice(RETRANSCRIBE_NOTICE)
         if (view) view.focus()
+        // Пересчитанный текст — тоже сырой whisper-текст: активная роль
+        // правит и его. Снимок Undo при этом сменится на пред-правочный —
+        // последняя замена объясняется последней плашкой.
+        lastDurationRef.current = res.durationSecs
+        refineWithRole()
         // Журнал: плитка этой сессии должна держать ИСПРАВЛЕННЫЙ текст, а не
         // бессмысленный от неверного языка — иначе починка языка живёт только
         // до закрытия панели. Растим ту же запись, что и дозаписи (одна
@@ -898,6 +1032,26 @@ export function Overlay() {
         }
         if (editorFocused) return // редактор/vim разберётся сам
         hideOverlay()
+        return
+      }
+      if (matchesShortcut(e, REDO_AS_SHORTCUT)) {
+        // Селектор есть в DOM только в фазе ready (см. .lang-row ниже) и
+        // отключён, пока повтор уже идёт, — оба случая закрывает проверка
+        // элемента, второго источника правды о доступности не заводим.
+        const sel = langForceRef.current
+        if (!sel || sel.disabled) return
+        // preventDefault в том числе отбирает Cmd+R у перезагрузки webview.
+        e.preventDefault()
+        sel.focus()
+        // Именно РАСКРЫТЬ список, а не только сфокусировать: в открытом
+        // списке стрелки ходят по пунктам, не меняя значения, Enter выбирает
+        // (fires change → onForceLanguage), Escape закрывает без выбора.
+        try {
+          sel.showPicker()
+        } catch {
+          // Нет transient activation или старый WebKit — остаётся фокус, на
+          // macOS стрелка вниз раскрывает сфокусированный список сама.
+        }
         return
       }
       if (matchesShortcut(e, pasteShortcutRef.current)) {
@@ -1399,10 +1553,12 @@ export function Overlay() {
               в Recognition settings; выбор здесь действует на одну запись и
               гаснет с началом следующей (см. rec:start). */}
           <select
+            ref={langForceRef}
             className="lang-force"
             value=""
             disabled={!hasRecording || retranscribing}
             aria-label="Re-transcribe this recording in another language"
+            title="⌘R opens this list"
             onChange={(e) => onForceLanguage(e.target.value as ForcedLanguage)}
           >
             <option value="" disabled>
@@ -1426,12 +1582,43 @@ export function Overlay() {
           {retranscribeError} The text is unchanged.
         </div>
       )}
+      {/* Роль диктора — постоянное предпочтение, в отличие от разового
+          «Redo as» выше, поэтому селектор показывает текущее значение и
+          виден всегда (пока роли вообще заведены в настройках): роль
+          выбирают и ПЕРЕД записью, не только над готовым текстом. */}
+      {roles.length > 0 && (
+        <div className="lang-row">
+          <span className="lang-chip">Role</span>
+          <select
+            className="lang-force"
+            value={activeRoleId ?? ''}
+            disabled={refining}
+            aria-label="Dictor role that polishes the transcript through the AI provider"
+            onChange={(e) => onRoleChange(e.target.value)}
+          >
+            <option value="">No role</option>
+            {roles.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.name || '(unnamed)'}
+              </option>
+            ))}
+          </select>
+          {refining && <span className="lang-chip">Polishing…</span>}
+        </div>
+      )}
+      {/* ИИ-правка не удалась — та же поверхность и тот же довод, что у
+          retranscribeError: сырой текст на месте и работает. */}
+      {refineError && (
+        <div className="device-notice">
+          {refineError} The raw transcript is unchanged.
+        </div>
+      )}
       {/* Строка возврата заменённого текста — нейтральная плашка, не ошибка:
           ничего не сломалось, текст заменён ровно так, как и просили. Тот же
           приём, что .mw-notice в главном окне. */}
       {replaced !== null && (
         <div className="overlay-notice">
-          <span>{RETRANSCRIBE_NOTICE}</span>
+          <span>{replacedNotice}</span>
           <div className="overlay-notice-actions">
             <button onClick={onUndoReplace}>Undo</button>
             <button onClick={() => setReplaced(null)}>Dismiss</button>
