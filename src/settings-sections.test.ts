@@ -9,14 +9,14 @@ import {
 } from './settings-sections.ts'
 import type { Settings } from './api.ts'
 
-test('состав разделов — шесть, в порядке брифа', () => {
+test('состав разделов — семь, в порядке брифа', () => {
   assert.deepEqual(
     SECTIONS.map((s) => s.id),
-    ['audio', 'models', 'recognition', 'shortcuts', 'ai', 'appearance']
+    ['audio', 'models', 'recognition', 'shortcuts', 'ai', 'appearance', 'license']
   )
   assert.deepEqual(
     SECTIONS.map((s) => s.title),
-    ['Audio', 'Models', 'Recognition', 'Shortcuts', 'AI', 'Appearance']
+    ['Audio', 'Models', 'Recognition', 'Shortcuts', 'AI', 'Appearance', 'License']
   )
 })
 
@@ -28,10 +28,12 @@ test('прозрачность окон живёт в Appearance, а не вти
   assert.deepEqual(SECTIONS.find((s) => s.id === 'appearance')!.settings, ['windowOpacity'])
 })
 
-// Appearance стоит последним и не подвинул стартовый раздел: окно настроек
-// открывают ради дела, а не ради того, чтобы посмотреть на него же.
-test('Appearance стоит последним', () => {
-  assert.equal(SECTIONS[SECTIONS.length - 1].id, 'appearance')
+// Appearance и License стоят в хвосте и не подвинули стартовый раздел: окно
+// настроек открывают ради дела, а не ради того, чтобы посмотреть на него же;
+// лицензию трогают один раз.
+test('Appearance и License стоят последними', () => {
+  assert.equal(SECTIONS[SECTIONS.length - 1].id, 'license')
+  assert.equal(SECTIONS[SECTIONS.length - 2].id, 'appearance')
   assert.notEqual(FIRST_SECTION, 'appearance')
 })
 
@@ -42,7 +44,10 @@ test('при открытии окна показан первый раздел'
 
 test('пустых разделов нет: в каждом есть что настраивать', () => {
   for (const s of SECTIONS) {
-    assert.ok(s.settings.length > 0, `раздел ${s.id} пуст`)
+    // License — единственное исключение: его содержимое живёт в
+    // license.json и Paddle, а не в settings.json (см. комментарий в
+    // settings-sections.ts), пустой список настроек там честен.
+    if (s.id !== 'license') assert.ok(s.settings.length > 0, `раздел ${s.id} пуст`)
     assert.ok(s.summary.length > 0, `у раздела ${s.id} нет подписи`)
   }
 })
@@ -50,11 +55,11 @@ test('пустых разделов нет: в каждом есть что на
 test('распределение настроек по разделам — ровно как в брифе', () => {
   const byId = (id: string) => SECTIONS.find((s) => s.id === id)!.settings
   // Audio — что попадает в микрофон.
-  assert.deepEqual(byId('audio'), ['inputDevice', 'echoCancellation', 'highPassFilter', 'micGain'])
+  assert.deepEqual(byId('audio'), ['inputDevice', 'muteSystemAudio', 'highPassFilter', 'micGain'])
   // Models — что скачивается и занимает диск.
   assert.deepEqual(byId('models'), ['modelPath', 'vadModelPath'])
   // Recognition — как звук превращается в текст.
-  assert.deepEqual(byId('recognition'), ['language', 'vadThreshold', 'dictionary'])
+  assert.deepEqual(byId('recognition'), ['language', 'vadThreshold', 'dictionary', 'smartReplaces'])
   // Shortcuts — управление.
   assert.deepEqual(byId('shortcuts'), [
     'hotkey',
@@ -72,7 +77,14 @@ test('распределение настроек по разделам — ро
     'acceptShortcut',
   ])
   // AI — обработка уже готового текста: провайдер и то, что у него просят.
-  assert.deepEqual(byId('ai'), ['ai', 'translateLanguages', 'dictorRoles', 'dictorRole'])
+  assert.deepEqual(byId('ai'), [
+    'ai',
+    'translateLanguages',
+    'dictorRoles',
+    'dictorRole',
+    'appRoles',
+    'journalPath',
+  ])
 })
 
 // Языки перевода — цели ИИ-действия, а язык whisper — вход распознавания.
@@ -125,12 +137,15 @@ test('каждая хранимая настройка доступна хотя
     micGain: 1,
     vadThreshold: 0.5,
     inputDevice: null,
-    echoCancellation: true,
+    muteSystemAudio: true,
     highPassFilter: true,
     windowOpacity: 0.9,
     dictionary: '',
     dictorRoles: [],
     dictorRole: null,
+    smartReplaces: [],
+    appRoles: [],
+    journalPath: '',
   }
   const stored = Object.keys(sample).sort()
   const placed = [...ALL_SETTING_KEYS].sort()

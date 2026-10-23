@@ -26,13 +26,25 @@ pub trait CaptureOps {
     fn read_text(&self) -> Option<String>;
     fn write_text(&self, text: &str) -> anyhow::Result<()>;
     fn sleep(&self, d: Duration);
+    /// Rich-вариант выделения, уже переведённый в Markdown, если приложение
+    /// его дало (см. `macos::read_pasteboard_html`). `None` — разметки не было,
+    /// захват остаётся на плоском тексте. Дефолт `None`: источникам без
+    /// буфера-с-HTML (тесты) переопределять нечего.
+    fn read_markdown(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Что получилось у захвата.
 #[derive(Debug)]
 pub struct CaptureOutcome {
-    /// Выделенный текст, уже обрезанный по краям.
+    /// Выделенный текст, уже обрезанный по краям. Если было rich-выделение —
+    /// это Markdown, иначе плоский текст (см. `was_rich`).
     pub text: String,
+    /// Было ли у выделения форматирование (пришёл HTML-вариант). Окно по этому
+    /// флагу решает, предлагать ли выбор формата при вставке: для обычной
+    /// диктовки и текста без разметки выбор не нужен.
+    pub was_rich: bool,
     /// Удалось ли вернуть прежнее содержимое буфера обмена. `false` означает
     /// одно из трёх: возвращать было нечего, там лежал не текст, либо запись
     /// обратно не удалась — и тогда в буфере осталось захваченное выделение.
@@ -126,7 +138,15 @@ pub fn capture_selection<O: CaptureOps>(ops: &O) -> anyhow::Result<Option<Captur
     }
 
     let captured = ops.read_text().unwrap_or_default();
-    let text = captured.trim().to_string();
+    let plain = captured.trim().to_string();
+
+    // Rich-вариант (уже Markdown), если приложение его дало, — он и становится
+    // текстом; плоский остаётся запасным. Пустой Markdown (разметка была, а
+    // содержимого нет) не в счёт — откатываемся на плоский.
+    let (text, was_rich) = match ops.read_markdown() {
+        Some(md) if !md.trim().is_empty() => (md.trim().to_string(), true),
+        _ => (plain, false),
+    };
 
     // Буфер возвращаем ДО проверки на пустоту: выделение могло оказаться
     // одними пробелами, но чужое содержимое всё равно наше не по праву.
@@ -146,7 +166,7 @@ pub fn capture_selection<O: CaptureOps>(ops: &O) -> anyhow::Result<Option<Captur
         return Ok(None);
     }
 
-    Ok(Some(CaptureOutcome { text, restored_clipboard }))
+    Ok(Some(CaptureOutcome { text, was_rich, restored_clipboard }))
 }
 
 #[cfg(test)]
@@ -171,6 +191,8 @@ mod tests {
         slept: RefCell<Duration>,
         /// Буфер обмена не принимает запись — занят другим процессом.
         write_fails: bool,
+        /// Rich-вариант выделения (Markdown), если приложение его дало.
+        markdown: Option<String>,
     }
 
     impl Fake {
@@ -183,11 +205,17 @@ mod tests {
                 writes: RefCell::new(Vec::new()),
                 slept: RefCell::new(Duration::ZERO),
                 write_fails: false,
+                markdown: None,
             }
         }
 
         fn with_failing_writes(mut self) -> Self {
             self.write_fails = true;
+            self
+        }
+
+        fn with_markdown(mut self, md: &str) -> Self {
+            self.markdown = Some(md.to_string());
             self
         }
     }
@@ -225,6 +253,10 @@ mod tests {
             *self.polls.borrow_mut() += 1;
             *self.slept.borrow_mut() += d;
         }
+
+        fn read_markdown(&self) -> Option<String> {
+            self.markdown.clone()
+        }
     }
 
     #[test]
@@ -232,6 +264,18 @@ mod tests {
         let ops = Fake::new(Some(1), Some("старое"), Some("выделенное"));
         let out = capture_selection(&ops).unwrap().expect("выделение было");
         assert_eq!(out.text, "выделенное");
+        assert!(!out.was_rich, "плоский текст пометился как rich");
+    }
+
+    #[test]
+    fn prefers_the_rich_markdown_over_plain_and_flags_it() {
+        // Приложение дало и плоский текст, и rich-вариант: в окно должен
+        // уехать Markdown, а флаг was_rich — включиться, чтобы предложить выбор
+        // формата при вставке.
+        let ops = Fake::new(Some(1), Some("старое"), Some("плоский")).with_markdown("**жирный**");
+        let out = capture_selection(&ops).unwrap().expect("выделение было");
+        assert_eq!(out.text, "**жирный**");
+        assert!(out.was_rich, "rich-выделение не пометилось флагом");
     }
 
     #[test]

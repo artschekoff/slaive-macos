@@ -66,6 +66,7 @@ import {
   type HistoryEntry,
   type Settings,
   type SourceApp,
+  type PasteFormat,
 } from './api'
 import { HistoryView } from './HistoryView'
 import {
@@ -86,7 +87,24 @@ import { formatShortcutBadge, matchesShortcut } from './shortcut'
 const DEFAULT_MAIN_PASTE_SHORTCUT = 'Super+Enter'
 const DEFAULT_MAIN_COPY_SHORTCUT = 'Super+KeyC'
 
-type FollowPayload = { text: string }
+type FollowPayload = { text: string; wasRich: boolean }
+
+// Три кнопки выбора формата. Это UI-уровень; в команду вставки они переводятся
+// через toPasteCommandFormat ниже (api.ts знает только verbatim/plain/rich).
+type PasteChoice = 'rich' | 'markdown' | 'plain'
+const PASTE_FORMAT_KEY = 'slaive.pasteFormat'
+// Дефолт 'rich': раз выделение было с разметкой, скорее всего её хотят живой обратно.
+const DEFAULT_PASTE_CHOICE: PasteChoice = 'rich'
+const PASTE_CHOICES: { id: PasteChoice; label: string }[] = [
+  { id: 'rich', label: 'Rich' },
+  { id: 'markdown', label: 'Markdown' },
+  { id: 'plain', label: 'Plain' },
+]
+
+// 'markdown' = отдать Markdown-исходник как есть, то есть команде это
+// 'verbatim' (писать текстом, без конвертации). 'rich'/'plain' — одноимённо.
+const toPasteCommandFormat = (choice: PasteChoice): PasteFormat =>
+  choice === 'markdown' ? 'verbatim' : choice
 
 // Подписи строки с Undo. Две, потому что причины замены разные, и «откуда
 // взялся этот текст» — единственное, что здесь нужно объяснить.
@@ -108,6 +126,30 @@ export function MainWindow() {
   // источник истины — тот же приём, что в Overlay.tsx.
   const [hasText, setHasText] = useState(false)
   const [vimMode, setVimMode] = useState<VimMode>('normal')
+
+  // Было ли у пришедшего текста форматирование (rich-захват). Только тогда
+  // показываем выбор формата вставки; диктовка и текст без разметки приходят с
+  // false и вставляются как есть, без лишних кнопок. Приходит в follow:text.
+  const [wasRich, setWasRich] = useState(false)
+  // Выбор формата, запомненный между вызовами. Читаем localStorage один раз;
+  // битое/чужое значение отбрасываем к дефолту.
+  const [pasteChoice, setPasteChoice] = useState<PasteChoice>(() => {
+    try {
+      const saved = localStorage.getItem(PASTE_FORMAT_KEY)
+      if (saved && PASTE_CHOICES.some((c) => c.id === saved)) return saved as PasteChoice
+    } catch {
+      // приватное окно / заблокированный storage — молча на дефолт
+    }
+    return DEFAULT_PASTE_CHOICE
+  })
+  const chooseFormat = (choice: PasteChoice) => {
+    setPasteChoice(choice)
+    try {
+      localStorage.setItem(PASTE_FORMAT_KEY, choice)
+    } catch {
+      // не сохранилось — не беда, в этой сессии выбор всё равно действует
+    }
+  }
 
   // Языки перевода — настройка, а не константа: из неё строится подменю
   // Translate (см. action-tree.ts). Держим сырую строку настройки, а дерево
@@ -368,6 +410,9 @@ export function MainWindow() {
       // что у onCancel ниже.
       if (applyStateRef.current.phase === 'pending') void cancelAiAction()
       if (view) resetEditorContent(view, e.payload.text)
+      // Форматирование у нового текста могло появиться или пропасть — выбор
+      // формата показываем/прячем по этому флагу (см. mw-source-row ниже).
+      setWasRich(e.payload.wasRich)
       setMenuState(rootMenuState(actionTreeRef.current))
       setApplyState(idleApplyState())
       setActionError(null)
@@ -606,10 +651,13 @@ export function MainWindow() {
     // Цепочкой, а не двумя параллельными вызовами: порядок «окно ушло →
     // вставляем» должен быть порядком, а не совпадением. Отказ спрятать окно
     // вставку не отменяет — paste_text всё равно активирует приложение-цель.
+    // Формат — только когда был rich-захват; иначе текст плоский, вставляем
+    // как есть. Выбор markdown/rich/plain переводится в формат команды.
+    const format: PasteFormat = wasRich ? toPasteCommandFormat(pasteChoice) : 'verbatim'
     const sendToSourceApp = () =>
       hideMainWindow()
         .catch(() => {})
-        .then(() => pasteText(value))
+        .then(() => pasteText(value, format))
         .catch((e) => setActionError(String(e)))
 
     checkAccessibilityPermission()
@@ -1364,6 +1412,31 @@ export function MainWindow() {
               No source app — dictate with the hotkey from the app you want the text in
             </span>
           )
+        )}
+        {/* Выбор формата вставки — только для текста с разметкой. Это и есть
+            «спросить, в каком формате вставить», но без модалки: три кнопки
+            рядом с Paste, выбор запоминается (см. chooseFormat). */}
+        {wasRich && (
+          <div className="mw-format" role="group" aria-label="Paste format">
+            {PASTE_CHOICES.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                className={`mw-format-btn${pasteChoice === c.id ? ' selected' : ''}`}
+                aria-pressed={pasteChoice === c.id}
+                onClick={() => chooseFormat(c.id)}
+                title={
+                  c.id === 'rich'
+                    ? 'Paste with live formatting (bold, code, lists)'
+                    : c.id === 'markdown'
+                      ? 'Paste the Markdown source as plain text'
+                      : 'Paste as plain text, formatting stripped'
+                }
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
         )}
         <button
           className="mw-copy"

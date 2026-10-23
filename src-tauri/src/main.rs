@@ -4,12 +4,16 @@ mod ai;
 mod audio;
 mod capture;
 mod commands;
+mod format;
 mod history;
+mod journal;
+mod license;
 mod macos;
 mod model;
 mod recent_actions;
 mod settings;
 mod state;
+mod system_audio;
 mod whisper;
 
 use tauri::{
@@ -66,6 +70,14 @@ fn main() {
             commands::run_ai_action,
             commands::cancel_ai_action,
             commands::set_dictor_role,
+            commands::append_journal,
+            commands::license_status,
+            commands::activate_license,
+            commands::open_buy_page,
+            commands::setup_report,
+            commands::resolve_setup,
+            commands::setup_mark_complete,
+            commands::hide_setup_window,
             commands::check_accessibility_permission,
             commands::open_settings_window,
             commands::follow_to_main_window,
@@ -120,17 +132,6 @@ fn main() {
                 *app.state::<state::AppState>().hotkey_ok.lock().unwrap() = false;
             }
 
-            // Прогрев эхоподавления — в фоне, старт приложения не ждёт:
-            // VPIO-граф собирается сотни миллисекунд, и без прогрева их
-            // платило бы первое нажатие хоткея записи (см. audio.rs).
-            {
-                let state = app.state::<state::AppState>();
-                let s = state.settings.lock().unwrap();
-                if s.echo_cancellation {
-                    audio::prewarm_echo_cancellation(s.input_device.clone());
-                }
-            }
-
             let capture_hotkey = app
                 .state::<state::AppState>()
                 .settings
@@ -176,6 +177,21 @@ fn main() {
                 });
             }
 
+            // Окно Setup прячется, а не уничтожается — тот же приём и тот же
+            // довод, что у настроек выше: пункт трея и автопоказ на старте
+            // ждут живое окно от get_webview_window.
+            if let Some(setup_window) = app.get_webview_window("setup") {
+                let app_handle = app.handle().clone();
+                setup_window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        if let Some(w) = app_handle.get_webview_window("setup") {
+                            let _ = w.hide();
+                        }
+                    }
+                });
+            }
+
             // Главное окно — синглтон, как overlay/settings: объявлено в
             // tauri.conf.json скрытым, никогда не уничтожается, только
             // прячется. CloseRequested по умолчанию уничтожил бы окно —
@@ -208,9 +224,10 @@ fn main() {
             // надиктовав сначала что-нибудь.
             let main_item = MenuItemBuilder::with_id("main", "Open Slaive…").build(app)?;
             let settings_item = MenuItemBuilder::with_id("settings", "Settings…").build(app)?;
+            let setup_item = MenuItemBuilder::with_id("setup", "Setup check…").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app)
-                .items(&[&main_item, &settings_item, &quit_item])
+                .items(&[&main_item, &settings_item, &setup_item, &quit_item])
                 .build()?;
 
             // Отдельная иконка для строки меню, а не иконка приложения.
@@ -235,10 +252,28 @@ fn main() {
                             let _ = w.set_focus();
                         }
                     }
+                    "setup" => {
+                        // Открыто рукой — окно не самоскрывается: человек
+                        // пришёл смотреть на статусы, пусть смотрит.
+                        *app.state::<state::AppState>().setup_auto_opened.lock().unwrap() = false;
+                        commands::show_setup_window(app);
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })
                 .build(app)?;
+
+            // Окно Setup на старте — только когда что-то из обязательного не
+            // готово (первый запуск, отозванное право, истёкший триал). Все
+            // проверки setup_needed дешёвые и БЕЗ системных диалогов — сам
+            // диалог Automation случится уже внутри открытого окна, в
+            // контексте (см. setup_report).
+            if commands::setup_needed(app.handle()) {
+                // Признак «открыто автоматикой»: такому окну разрешено
+                // спрятаться самому, когда проверки дозеленеют.
+                *app.state::<state::AppState>().setup_auto_opened.lock().unwrap() = true;
+                commands::show_setup_window(app.handle());
+            }
 
             Ok(())
         })
@@ -251,6 +286,10 @@ fn main() {
             // событием (см. macos::terminate_immediately).
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 api.prevent_exit();
+                // Quit посреди записи не должен оставить Mac беззвучным:
+                // mute снимается до того, как процесс умрёт (после краха
+                // его не снимет никто — честное ограничение подхода).
+                system_audio::restore_muted_outputs();
                 macos::terminate_immediately();
             }
         });

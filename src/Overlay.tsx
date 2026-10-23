@@ -8,6 +8,7 @@ import {
   updateHistoryEntry,
   checkAccessibilityPermission,
   copyText,
+  appendJournal,
   followToMainWindow,
   getLastRecording,
   getSettings,
@@ -40,7 +41,15 @@ import {
   type VimMode,
 } from './transcript-editor'
 import { resampleLevels } from './levels'
-import { buildRoleSystemPrompt, findRole, type DictorRole } from './dictor-roles'
+import {
+  buildRoleSystemPrompt,
+  findRole,
+  roleForApp,
+  type AppRole,
+  type DictorRole,
+} from './dictor-roles'
+import { applySmartReplaces, type SmartReplace } from './smart-replace'
+import { formatJournalEntry } from './journal'
 import micIcon from './assets/mic.png'
 
 type Phase = 'idle' | 'recording' | 'transcribing' | 'ready' | 'error'
@@ -190,6 +199,18 @@ const FORCED_LANGUAGES: { value: ForcedLanguage; label: string }[] = [
 // грамматике Vim модификатора Cmd не бывает, у редактора ничего не отбирается.
 const REDO_AS_SHORTCUT = 'Super+KeyR'
 
+// То же самое для селектора роли диктора: Cmd+D (Dictor) раскрывает список,
+// дальше стрелки/Enter/Escape — штатное поведение открытого нативного
+// списка. Захардкожен по тем же причинам, что REDO_AS_SHORTCUT выше. D —
+// потому что R занят «Redo as», а в этом окне Cmd+D больше ничем не занят.
+const ROLE_SHORTCUT = 'Super+KeyD'
+
+// Хоткей кнопки Journal. Захардкожен в отличие от Paste/Copy/Follow:
+// пока фича молодая, настройка хоткея — преждевременная роскошь, а Cmd+J
+// в этом окне ничем не занят (в грамматике Vim модификатора Cmd нет).
+// ponytail: вынести в настройки рядом с followShortcut, когда попросят.
+const JOURNAL_SHORTCUT = 'Super+KeyJ'
+
 // Подпись строки с Undo — та же роль и тот же приём, что у HISTORY_NOTICE/
 // NEW_TEXT_NOTICE в главном окне (см. MainWindow.tsx): замена задумана, но
 // «задумано» не оправдывает молчаливую потерю правок, которые человек внёс
@@ -299,6 +320,21 @@ export function Overlay() {
   // же приём, что pasteShortcutRef/copyShortcutRef ниже.
   const rolesRef = useRef<DictorRole[]>([])
   const activeRoleIdRef = useRef<string | null>(null)
+  // Пары Smart Replace — только ref, без state: списком панель ничего не
+  // рендерит, он нужен лишь обработчикам transcript/retranscribe.
+  const smartReplacesRef = useRef<SmartReplace[]>([])
+  // Словарь терминов — в промпт ИИ-правки (см. buildRoleSystemPrompt):
+  // тоже только ref, панель его не показывает.
+  const dictionaryRef = useRef('')
+  // Авто-роль по приложению: привязки из настроек, имя исходного
+  // приложения (зеркало sourceApp — state читать из once-mounted
+  // обработчика transcript нельзя) и ПОСТОЯННЫЙ выбор роли из настроек.
+  // Последний нужен отдельно от activeRoleIdRef: тот на время записи
+  // поверх привязанного приложения подменяется авто-ролью, и следующей
+  // записи без привязки надо откуда-то вернуть выбор пользователя.
+  const appRolesRef = useRef<AppRole[]>([])
+  const sourceAppNameRef = useRef<string | null>(null)
+  const savedRoleIdRef = useRef<string | null>(null)
   // Длительность последней расшифровки — нужна ИИ-правке, чтобы обновить ту
   // же плитку журнала (updateHistoryEntry требует duration, а правка
   // случается позже события, которое её принесло).
@@ -313,6 +349,10 @@ export function Overlay() {
   // (у него своя причина и не связан с Paste вовсе).
   const [showAccessModal, setShowAccessModal] = useState(false)
   const [copied, setCopied] = useState(false)
+  // Путь к журналу — state, а не ref: от него зависит, рендерится ли
+  // кнопка Journal вовсе. `journaled` — та же вспышка, что `copied`.
+  const [journalPath, setJournalPath] = useState('')
+  const [journaled, setJournaled] = useState(false)
   const [levels, setLevels] = useState<number[]>([])
   const [hasRecording, setHasRecording] = useState(false)
   const [isPlaying, setIsPlaying] = useState(false)
@@ -362,6 +402,11 @@ export function Overlay() {
       rolesRef.current = s.dictorRoles
       setActiveRoleId(s.dictorRole)
       activeRoleIdRef.current = s.dictorRole
+      savedRoleIdRef.current = s.dictorRole
+      appRolesRef.current = s.appRoles
+      smartReplacesRef.current = s.smartReplaces
+      dictionaryRef.current = s.dictionary
+      setJournalPath(s.journalPath.trim())
     }
     getSettings().then(apply)
     const un = listen<Settings>('settings:changed', (e) => apply(e.payload))
@@ -393,7 +438,7 @@ export function Overlay() {
     if (!raw.trim()) return
     setRefining(true)
     setRefineError('')
-    runAiAction(buildRoleSystemPrompt(role), raw)
+    runAiAction(buildRoleSystemPrompt(role, dictionaryRef.current), raw)
       .then((fixed) => {
         const v = viewRef.current
         // Пока ждали ответ, документ сменился — новая запись, правка руками,
@@ -461,9 +506,11 @@ export function Overlay() {
   const editorContainerRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
 
-  // Селектор «Redo as» — чтобы Cmd+R мог раскрыть его из глобального
-  // обработчика клавиш. Ref, а не состояние: элемент нужен только там.
+  // Селекторы «Redo as» и роли — чтобы Cmd+R/Cmd+D могли раскрыть их из
+  // глобального обработчика клавиш. Ref, а не состояние: элементы нужны
+  // только там.
   const langForceRef = useRef<HTMLSelectElement>(null)
+  const roleSelectRef = useRef<HTMLSelectElement>(null)
 
   // Корень панели — источник измерения для авто-высоты окна (часть 2, см.
   // эффект ResizeObserver ниже).
@@ -627,6 +674,7 @@ export function Overlay() {
           // Шапка приходит отдельным событием с фонового потока чуть позже —
           // старое приложение не должно провисеть над новой записью до тех пор.
           setSourceApp(null)
+          sourceAppNameRef.current = null
           // Очищаем редактор и возвращаем его в normal — то же самое "новый
           // цикл — чистый лист", что раньше делал один setText(''). Панель НЕ
           // забирает фокус здесь (запись только начинается, исходное приложение
@@ -665,9 +713,14 @@ export function Overlay() {
       }),
       listen<SourceAppPayload>('app:source', (e) => {
         setSourceApp(e.payload)
+        sourceAppNameRef.current = e.payload?.name ?? null
       }),
       listen<TranscriptPayload>('transcript', (e) => {
         const view = viewRef.current
+        // Smart Replace — до показа и до ИИ-правки: пользователь сразу видит
+        // итоговый текст, а роль правит уже подставленные ссылки и имена, а
+        // не произнесённые фразы-заготовки (см. smart-replace.ts).
+        const text = applySmartReplaces(e.payload.text, smartReplacesRef.current)
         if (view) {
           // Дозапись идёт ЧЕРЕЗ ДОКУМЕНТ РЕДАКТОРА, в позицию курсора (или
           // вместо выделения) — appendTranscript трогает только диапазон
@@ -676,8 +729,8 @@ export function Overlay() {
           // включая перемещение курсора, пока диктовал продолжение
           // (в Vim-режиме это основной сценарий), и эти правки — в том
           // числе то, ГДЕ стоит курсор, — обязаны пережить добавку.
-          if (e.payload.append) appendTranscript(view, e.payload.text)
-          else resetEditorContent(view, e.payload.text)
+          if (e.payload.append) appendTranscript(view, text)
+          else resetEditorContent(view, text)
           // В журнал уходит ИТОГОВЫЙ текст — то, что лежит в документе ПОСЛЕ
           // применения расшифровки. При дозаписи бэкенд итогового текста не
           // знает (он прислал только новый фрагмент), поэтому читаем его
@@ -737,10 +790,32 @@ export function Overlay() {
         // ИИ-правка под активную роль — поверх уже показанного текста, см.
         // refineWithRole. Роль не выбрана — вызов выходит сразу, без сети.
         lastDurationRef.current = e.payload.durationSecs
-        refineWithRole()
+        // Авто-роль по приложению: запись началась поверх привязанного
+        // приложения — эту расшифровку правит роль из привязки, и селектор
+        // честно её показывает. Привязки нет — выбор возвращается к
+        // постоянному (savedRoleIdRef): подмена живёт одну запись и не
+        // утекает ни в настройки, ни в записи из других приложений.
+        const autoRole = roleForApp(
+          appRolesRef.current,
+          rolesRef.current,
+          sourceAppNameRef.current,
+        )
+        const effectiveId = autoRole ? autoRole.id : savedRoleIdRef.current
+        setActiveRoleId(effectiveId)
+        activeRoleIdRef.current = effectiveId
+        refineWithRole(autoRole ?? undefined)
       }),
       listen<string>('rec:device-fallback', (e) => {
         setDeviceNotice(e.payload)
+      }),
+      // Триал кончился: запись не началась (гейт в begin_recording), панель
+      // объясняет почему. Фаза ошибки честна — нажатие не сделало ничего.
+      listen('license:expired', () => {
+        setError(
+          'The 14-day trial is over. Open Settings → License to enter a key or buy one — ' +
+            'your text and settings are untouched.'
+        )
+        setPhase('error')
       }),
       // Потолок накопленного звука сессии (см. audio::MAX_SESSION_SAMPLES и
       // spawn_level_emitter/begin_recording в commands.rs). Приходит в двух
@@ -875,6 +950,25 @@ export function Overlay() {
     })
   }
 
+  // Journal: дописать текущий текст в markdown-файл пользователя (см.
+  // journal.ts / append_journal). Та же вспышка-подтверждение, что у Copy,
+  // и тот же путь ошибки: неудачная запись — реальная потеря действия (в
+  // отличие от фоновой history), пользователь нажал и ждёт результата.
+  const onJournal = () => {
+    const value = viewRef.current?.state.doc.toString() ?? ''
+    if (!value.trim()) return
+    appendJournal(formatJournalEntry(value, new Date()))
+      .then(() => {
+        setJournaled(true)
+        setTimeout(() => setJournaled(false), 1500)
+      })
+      .catch((e) => {
+        setError(String(e))
+        setPhase('error')
+        setPermissionPane(null)
+      })
+  }
+
   // Та же логика чтения, что и в onPaste — пустой транскрипт не должен
   // копироваться так же, как не должен пастить.
   const onCopy = () => {
@@ -916,10 +1010,13 @@ export function Overlay() {
     retranscribe(lang)
       .then((res) => {
         const view = viewRef.current
+        // Пересчитанный текст — такой же сырой whisper-текст, Smart Replace
+        // применяется к нему ровно как в обработчике transcript.
+        const text = applySmartReplaces(res.text, smartReplacesRef.current)
         // Замена ЦЕЛИКОМ, а не вставка: пересчитан весь накопленный звук, и
         // приклеивать такой текст к старому означало бы показать сказанное
         // дважды. Прежнее содержимое уходит под Undo строкой ниже.
-        if (view) resetEditorContent(view, res.text)
+        if (view) resetEditorContent(view, text)
         setLanguage(res.language ? { name: res.language, forced: res.forced } : null)
         // Пустое (или пробельное) прежнее содержимое возвращать незачем —
         // тот же порог, что в главном окне.
@@ -939,8 +1036,8 @@ export function Overlay() {
         historyWriteRef.current = historyWriteRef.current
           .then((entryId) =>
             entryId !== null
-              ? updateHistoryEntry(entryId, res.text, res.durationSecs)
-              : addHistoryEntry(res.text, res.durationSecs)
+              ? updateHistoryEntry(entryId, text, res.durationSecs)
+              : addHistoryEntry(text, res.durationSecs)
           )
           .catch((err) => {
             console.error('история: повторная расшифровка не сохранена:', String(err))
@@ -1034,20 +1131,25 @@ export function Overlay() {
         hideOverlay()
         return
       }
-      if (matchesShortcut(e, REDO_AS_SHORTCUT)) {
-        // Селектор есть в DOM только в фазе ready (см. .lang-row ниже) и
-        // отключён, пока повтор уже идёт, — оба случая закрывает проверка
-        // элемента, второго источника правды о доступности не заводим.
-        const sel = langForceRef.current
-        if (!sel || sel.disabled) return
+      // Раскрытие селекторов с клавиатуры — Cmd+R для «Redo as», Cmd+D для
+      // роли. Селектор может отсутствовать в DOM (не та фаза, ролей нет) или
+      // быть отключён (повтор/правка уже идёт) — оба случая закрывает
+      // проверка элемента, второго источника правды о доступности не заводим.
+      const pickerFor = matchesShortcut(e, REDO_AS_SHORTCUT)
+        ? langForceRef.current
+        : matchesShortcut(e, ROLE_SHORTCUT)
+          ? roleSelectRef.current
+          : null
+      if (pickerFor) {
+        if (pickerFor.disabled) return
         // preventDefault в том числе отбирает Cmd+R у перезагрузки webview.
         e.preventDefault()
-        sel.focus()
+        pickerFor.focus()
         // Именно РАСКРЫТЬ список, а не только сфокусировать: в открытом
         // списке стрелки ходят по пунктам, не меняя значения, Enter выбирает
-        // (fires change → onForceLanguage), Escape закрывает без выбора.
+        // (fires change), Escape закрывает без выбора.
         try {
-          sel.showPicker()
+          pickerFor.showPicker()
         } catch {
           // Нет transient activation или старый WebKit — остаётся фокус, на
           // macOS стрелка вниз раскрывает сфокусированный список сама.
@@ -1115,6 +1217,22 @@ export function Overlay() {
     }
     window.addEventListener('keydown', onFollowKey, true)
     return () => window.removeEventListener('keydown', onFollowKey, true)
+  })
+
+  // Cmd+J → Journal: тот же эффект-без-зависимостей, что у Follow выше, и
+  // тот же модальный guard. Пока путь к журналу не задан, кнопки нет — и
+  // хоткей обязан молчать так же.
+  useEffect(() => {
+    const onJournalKey = (e: KeyboardEvent) => {
+      if (showAccessModal) return
+      if (!journalPath) return
+      if (!matchesShortcut(e, JOURNAL_SHORTCUT)) return
+      e.preventDefault()
+      e.stopPropagation()
+      onJournal()
+    }
+    window.addEventListener('keydown', onJournalKey, true)
+    return () => window.removeEventListener('keydown', onJournalKey, true)
   })
 
   // Текущее проигрывание — чтобы повторный Play/перемотка обрывали
@@ -1521,6 +1639,19 @@ export function Overlay() {
           normal режиме обрабатываются через Vim.mapCommand (см. верх файла);
           хоткей Copy — глобально (см. эффект выше), не здесь. */}
       <div className="transcript-field" ref={editorContainerRef} />
+      {/* ИИ-правка идёт: индикатор-«челнок» во всю ширину под полем текста
+          — на месте прежнего чипа «Polishing…» в строке роли, который был
+          незаметен. Бегущий сегмент, а не проценты: у запроса к модели нет
+          измеримого прогресса. */}
+      {refining && (
+        <div
+          className="refine-bar"
+          role="progressbar"
+          aria-label="Polishing the transcript with the dictor role"
+        >
+          <div className="refine-bar-thumb" />
+        </div>
+      )}
       {/* Строка про ЯЗЫК — и ярлык, и селектор принудительного выбора.
           Стоит между полем и действиями, вплотную под текстом, потому что
           относится именно к тексту: ярлык отвечает «на каком языке это
@@ -1531,21 +1662,22 @@ export function Overlay() {
           про звук, а язык про текст, и повторная расшифровка звука не
           касается вовсе (см. onForceLanguage).
 
-          Видна только когда есть что показывать: в фазах записи и ожидания
-          ярлыку нечего сообщать, а пересчитывать нечего. Ярлык внутри строки
+          Ярлык внутри строки
           — отдельное условие: в авторежиме язык определила модель, и это
           информация; при языке, приколотом в настройках, whisper его не
           определял — ему его назвали, и повторять человеку его же настройку
           значило бы занимать место шумом (решает бэкенд, см.
           language_report). Селектор остаётся в обоих случаях: приколотая
           настройка тоже бывает не тем, что нужно этой записи. */}
-      {(phase === 'ready' || retranscribing) && (
+      {/* Язык и роль — ОДНА строка из двух плотных пар «ярлык + селектор» с
+          КОНСТАНТНЫМ порядком: «Redo as» всегда первый (просто выключен,
+          пока пересчитывать нечего), роль всегда сразу за ним, чип
+          Detected/Forced — в конце строки у правого края. Прежняя версия
+          показывала языковую пару только в фазе ready и прижимала роль
+          вправо — роль прыгала от левого края к правому на каждой
+          расшифровке. */}
+      {(phase === 'ready' || retranscribing || roles.length > 0) && (
         <div className="lang-row">
-          {language && (
-            <span className={`lang-chip${language.forced ? ' forced' : ''}`}>
-              {language.forced ? 'Forced' : 'Detected'}: {language.name}
-            </span>
-          )}
           {/* Селектор сбрасывается в пустое значение после каждого выбора
               (value="" — контролируемое): это кнопка-действие, а не поле
               настройки, и показывать в нём «текущий язык» было бы обещанием
@@ -1556,7 +1688,7 @@ export function Overlay() {
             ref={langForceRef}
             className="lang-force"
             value=""
-            disabled={!hasRecording || retranscribing}
+            disabled={phase !== 'ready' || !hasRecording || retranscribing}
             aria-label="Re-transcribe this recording in another language"
             title="⌘R opens this list"
             onChange={(e) => onForceLanguage(e.target.value as ForcedLanguage)}
@@ -1570,6 +1702,45 @@ export function Overlay() {
               </option>
             ))}
           </select>
+          {/* Подпись хоткея — тот же бейдж, что на кнопках действий:
+              комбинация видна, а не спрятана в title. */}
+          <span className="shortcut-badge">{formatShortcutBadge(REDO_AS_SHORTCUT)}</span>
+          {/* Роль диктора — постоянное предпочтение, в отличие от разового
+              «Redo as» слева, поэтому селектор показывает текущее значение
+              и виден всегда (пока роли вообще заведены в настройках): роль
+              выбирают и ПЕРЕД записью, не только над готовым текстом.
+              Пара обёрнута в .role-group: ярлык, селектор и индикатор
+              держатся вплотную и двигаются по строке как одно целое. */}
+          {roles.length > 0 && (
+            <span className="role-group">
+              <span className="lang-chip">Role</span>
+              <select
+                ref={roleSelectRef}
+                className="lang-force"
+                value={activeRoleId ?? ''}
+                disabled={refining}
+                aria-label="Dictor role that polishes the transcript through the AI provider"
+                title="⌘D opens this list"
+                onChange={(e) => onRoleChange(e.target.value)}
+              >
+                <option value="">No role</option>
+                {roles.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name || '(unnamed)'}
+                  </option>
+                ))}
+              </select>
+              <span className="shortcut-badge">{formatShortcutBadge(ROLE_SHORTCUT)}</span>
+            </span>
+          )}
+          {/* Факт о языке — в конце строки у правого края: появляясь после
+              расшифровки, он никого не сдвигает, в отличие от прежнего места
+              перед селектором. */}
+          {(phase === 'ready' || retranscribing) && language && (
+            <span className={`lang-chip lang-report${language.forced ? ' forced' : ''}`}>
+              {language.forced ? 'Forced' : 'Detected'}: {language.name}
+            </span>
+          )}
         </div>
       )}
       {/* Повтор не удался. Та же поверхность, что у подмены микрофона и
@@ -1580,30 +1751,6 @@ export function Overlay() {
       {retranscribeError && (
         <div className="device-notice">
           {retranscribeError} The text is unchanged.
-        </div>
-      )}
-      {/* Роль диктора — постоянное предпочтение, в отличие от разового
-          «Redo as» выше, поэтому селектор показывает текущее значение и
-          виден всегда (пока роли вообще заведены в настройках): роль
-          выбирают и ПЕРЕД записью, не только над готовым текстом. */}
-      {roles.length > 0 && (
-        <div className="lang-row">
-          <span className="lang-chip">Role</span>
-          <select
-            className="lang-force"
-            value={activeRoleId ?? ''}
-            disabled={refining}
-            aria-label="Dictor role that polishes the transcript through the AI provider"
-            onChange={(e) => onRoleChange(e.target.value)}
-          >
-            <option value="">No role</option>
-            {roles.map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.name || '(unnamed)'}
-              </option>
-            ))}
-          </select>
-          {refining && <span className="lang-chip">Polishing…</span>}
         </div>
       )}
       {/* ИИ-правка не удалась — та же поверхность и тот же довод, что у
@@ -1656,6 +1803,18 @@ export function Overlay() {
         <button disabled={!hasText} onClick={onFollow}>
           Follow <span className="shortcut-badge">{formatShortcutBadge(followShortcut)}</span>
         </button>
+        {/* Journal — только при заданном в настройках пути: без него кнопка
+            вела бы в ошибку, а не в файл. Вспышка «Saved» — как у Copy. */}
+        {journalPath && (
+          <button disabled={!hasText} onClick={onJournal}>
+            {journaled ? 'Saved' : (
+              <>
+                Journal{' '}
+                <span className="shortcut-badge">{formatShortcutBadge(JOURNAL_SHORTCUT)}</span>
+              </>
+            )}
+          </button>
+        )}
       </div>
       {/* Модальный слой "отказано в праве" (permissionPane) — перекрывает
           всю панель, как и слой Paste ниже: инлайн-кнопкой в сетке действий

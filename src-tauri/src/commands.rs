@@ -8,7 +8,7 @@ use crate::recent_actions;
 use crate::settings::{self, Settings};
 use crate::state::AppState;
 use crate::whisper::{Transcriber, MIN_SAMPLES};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -519,6 +519,335 @@ pub fn set_dictor_role(
     Ok(())
 }
 
+/// Миллисекунды UTC от эпохи — часы для триала (см. license.rs: модуль
+/// принимает время аргументом и сам часов не трогает).
+fn license_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Статус лицензии для окон. Первый вызов за жизнь установки заодно
+/// стартует триал (см. license::status).
+#[tauri::command]
+pub fn license_status(app: AppHandle) -> Result<crate::license::LicenseStatus, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    Ok(crate::license::status(&dir, license_now_ms(), crate::license::PUBLIC_KEY_HEX))
+}
+
+/// Активация ключа из настроек. Возвращает свежий статус, чтобы интерфейсу
+/// не приходилось спрашивать его вторым вызовом.
+#[tauri::command]
+pub fn activate_license(
+    app: AppHandle,
+    key: String,
+) -> Result<crate::license::LicenseStatus, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    crate::license::activate(&dir, &key, crate::license::PUBLIC_KEY_HEX)?;
+    Ok(crate::license::status(&dir, license_now_ms(), crate::license::PUBLIC_KEY_HEX))
+}
+
+/// Одна строка окна Setup: что проверяли, как закончилось и чем чинить.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupCheck {
+    pub id: String,
+    pub title: String,
+    pub detail: String,
+    pub ok: bool,
+    /// Обязательные держат окно на старте; опциональные — серые, не красные.
+    pub required: bool,
+    /// Подпись кнопки починки. `None` — кнопки нет (всё хорошо).
+    pub action: Option<String>,
+}
+
+fn check(id: &str, title: &str, required: bool, ok: bool, detail: String, action: &str) -> SetupCheck {
+    SetupCheck {
+        id: id.to_string(),
+        title: title.to_string(),
+        detail,
+        ok,
+        required,
+        action: if ok { None } else { Some(action.to_string()) },
+    }
+}
+
+/// Маркер «первичная настройка пройдена»: пустой файл в app_data_dir.
+/// Пока его нет, окно Setup — онбординг: позеленевший чек-лист сменяется
+/// поздравлением с кнопкой OK (см. SetupWindow.tsx). После — обычный
+/// чек-лист диагностики, сколько бы раз окно ни открывали.
+fn setup_done_marker(app: &AppHandle) -> Option<std::path::PathBuf> {
+    data_dir(app).ok().map(|d| d.join("setup-done"))
+}
+
+/// Отчёт окна Setup: признак первичной настройки + все проверки разом.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupReport {
+    pub initial: bool,
+    /// Окно открыла автоматика старта — ему можно спрятаться самому,
+    /// когда обязательные проверки пройдут (см. state.setup_auto_opened).
+    pub auto_opened: bool,
+    pub checks: Vec<SetupCheck>,
+}
+
+/// Кнопка OK поздравления: записывает маркер и прячет окно. С этого
+/// момента онбординг закончен навсегда — окно из трея открывается уже
+/// как диагностика.
+#[tauri::command]
+pub fn setup_mark_complete(app: AppHandle) -> Result<(), String> {
+    if let Some(marker) = setup_done_marker(&app) {
+        if let Some(dir) = marker.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        std::fs::write(&marker, b"").map_err(|e| e.to_string())?;
+    }
+    if let Some(w) = app.get_webview_window("setup") {
+        let _ = w.hide();
+    }
+    Ok(())
+}
+
+/// Проверки окна Setup, все разом. Automation-проба внутри может показать
+/// системный диалог и подождать ответа (см. macos::automation_permitted) —
+/// команда зовётся только из окна Setup, где диалог уместен.
+#[tauri::command]
+pub fn setup_report(app: AppHandle, state: State<'_, AppState>) -> SetupReport {
+    let (model_path, vad_model_path, hotkey, ai_provider, ai_key_ok) = {
+        let s = state.settings.lock().unwrap();
+        let provider = s.ai.provider.clone();
+        let key_ok = ai_key_is_set(&provider);
+        (s.model_path.clone(), s.vad_model_path.clone(), s.hotkey.clone(), provider, key_ok)
+    };
+    let hotkey_ok = *state.hotkey_ok.lock().unwrap();
+
+    let model_ok = model_path.as_deref().is_some_and(|p| p.exists());
+    // Сначала пассивный статус; NotDetermined перепроверяется пробой —
+    // статус кэшируется в процессе и до перезапуска не замечает «Allow»,
+    // нажатый после первого опроса (см. microphone_permission_probe).
+    let mic_ok = match crate::macos::microphone_permission() {
+        Some(v) => v,
+        None => crate::macos::microphone_permission_probe(),
+    };
+    let accessibility = crate::macos::has_accessibility_permission();
+    let automation = crate::macos::automation_permitted();
+    let license = data_dir(&app)
+        .map(|dir| crate::license::status(&dir, license_now_ms(), crate::license::PUBLIC_KEY_HEX))
+        .unwrap_or(crate::license::LicenseStatus::Expired);
+    let initial = setup_done_marker(&app).is_none_or(|m| !m.exists());
+    let auto_opened = *state.setup_auto_opened.lock().unwrap();
+
+    let checks = vec![
+        check(
+            "model",
+            "Whisper model",
+            true,
+            model_ok,
+            if model_ok {
+                "Downloaded and selected.".into()
+            } else {
+                "No model yet — transcription can't run. Download one in Settings → Models.".into()
+            },
+            "Open Models",
+        ),
+        check(
+            "mic",
+            "Microphone access",
+            true,
+            mic_ok,
+            if mic_ok {
+                "Granted.".into()
+            } else {
+                "Denied. Recording gets silence until it's re-enabled in System Settings → \
+                 Privacy & Security → Microphone."
+                    .into()
+            },
+            "Open System Settings",
+        ),
+        check(
+            "accessibility",
+            "Accessibility (Paste)",
+            true,
+            accessibility,
+            if accessibility {
+                "Granted — Paste can type into other apps.".into()
+            } else {
+                "Needed for the Paste button to send text into the app you dictated over.".into()
+            },
+            "Open System Settings",
+        ),
+        check(
+            "automation",
+            "Automation (window focus)",
+            true,
+            automation,
+            if automation {
+                "Granted — Slaive can see and refocus the source app.".into()
+            } else {
+                "Needed to remember which app you dictated over and return focus to it.".into()
+            },
+            "Open System Settings",
+        ),
+        check(
+            "hotkey",
+            "Global hotkey",
+            true,
+            hotkey_ok,
+            if hotkey_ok {
+                format!("{hotkey} is registered.")
+            } else {
+                format!("{hotkey} couldn't be registered — likely taken by another app. Pick a \
+                         different combination.")
+            },
+            "Open Shortcuts",
+        ),
+        check(
+            "license",
+            "License",
+            true,
+            !matches!(license, crate::license::LicenseStatus::Expired),
+            match license {
+                crate::license::LicenseStatus::Licensed => "Licensed — lifetime.".into(),
+                crate::license::LicenseStatus::Trial { days_left } => {
+                    format!("Trial: {days_left} day{} left.", if days_left == 1 { "" } else { "s" })
+                }
+                crate::license::LicenseStatus::Expired => {
+                    "Trial expired — recording is paused until a key is entered.".into()
+                }
+            },
+            "Open License",
+        ),
+        check(
+            "ai-key",
+            "AI provider key (optional)",
+            false,
+            ai_key_ok,
+            if ai_key_ok {
+                format!("Key for {ai_provider} is in the Keychain.")
+            } else {
+                "Only needed for dictor roles and AI actions — transcription works without it."
+                    .into()
+            },
+            "Open AI settings",
+        ),
+        check(
+            "vad",
+            "VAD model (optional)",
+            false,
+            vad_model_path.as_deref().is_some_and(|p| p.exists()),
+            if vad_model_path.as_deref().is_some_and(|p| p.exists()) {
+                "Downloaded — silence is trimmed before transcription.".into()
+            } else {
+                "Optional: trims silence and background noise. Download in Settings → Models."
+                    .into()
+            },
+            "Open Models",
+        ),
+    ];
+    SetupReport { initial, auto_opened, checks }
+}
+
+/// Самоскрытие автоматически открытого окна Setup: все обязательные
+/// проверки прошли, держать окно больше незачем. Сбрасывает признак
+/// авто-открытия, чтобы следующий показ начал с чистого листа.
+#[tauri::command]
+pub fn hide_setup_window(app: AppHandle, state: State<'_, AppState>) {
+    *state.setup_auto_opened.lock().unwrap() = false;
+    if let Some(w) = app.get_webview_window("setup") {
+        let _ = w.hide();
+    }
+}
+
+/// Кнопка Resolve строки `id`: каждая ведёт в то место, где проблема
+/// чинится, — панель System Settings или раздел настроек приложения.
+#[tauri::command]
+pub fn resolve_setup(app: AppHandle, id: String) -> Result<(), String> {
+    match id.as_str() {
+        "model" | "vad" => open_settings_section(&app, "models"),
+        "mic" => crate::macos::open_microphone_pane(),
+        "accessibility" => macos::open_privacy_pane(macos::PrivacyPane::Accessibility),
+        "automation" => macos::open_privacy_pane(macos::PrivacyPane::Automation),
+        "hotkey" => open_settings_section(&app, "shortcuts"),
+        "license" => open_settings_section(&app, "license"),
+        "ai-key" => open_settings_section(&app, "ai"),
+        other => return Err(format!("Unknown setup check: {other}.")),
+    }
+    Ok(())
+}
+
+/// Показывает окно настроек на нужном разделе: окно слушает событие и
+/// переключает левый столбец само (см. Settings.tsx).
+fn open_settings_section(app: &AppHandle, section: &str) {
+    if let Some(w) = app.get_webview_window("settings") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+    let _ = app.emit_to("settings", "settings:open-section", section.to_string());
+}
+
+/// Быстрая часть проверок — решает, показывать ли окно Setup на старте.
+/// Automation-проба сюда НЕ входит намеренно: на неопределённом праве она
+/// показала бы системный диалог раньше, чем пользователь увидел хоть одно
+/// наше окно. Automation проверится, когда окно Setup откроется и позовёт
+/// setup_report — диалог появится уже в понятном контексте.
+pub fn setup_needed(app: &AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    let model_ok = {
+        let s = state.settings.lock().unwrap();
+        s.model_path.as_deref().is_some_and(|p| p.exists())
+    };
+    let hotkey_ok = *state.hotkey_ok.lock().unwrap();
+    let license_ok = data_dir(app)
+        .map(|dir| {
+            !matches!(
+                crate::license::status(&dir, license_now_ms(), crate::license::PUBLIC_KEY_HEX),
+                crate::license::LicenseStatus::Expired
+            )
+        })
+        .unwrap_or(true);
+    let mic_ok = crate::macos::microphone_permission() == Some(true);
+    let accessibility_ok = crate::macos::has_accessibility_permission();
+    !(model_ok && hotkey_ok && license_ok && mic_ok && accessibility_ok)
+}
+
+/// Открывает окно Setup — из трея и со старта (см. main.rs).
+pub fn show_setup_window(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    if let Some(w) = app.get_webview_window("setup") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+/// Открывает страницу покупки (hosted checkout Paddle) в браузере. URL
+/// зашит константой, а не приходит аргументом: команда «открой произвольный
+/// URL» была бы лишней поверхностью, нужна ровно одна страница.
+#[tauri::command]
+pub fn open_buy_page() -> Result<(), String> {
+    crate::macos::open_url(crate::license::BUY_URL)
+        .map_err(|_| "Couldn't open the browser. Visit the purchase page manually.".to_string())
+}
+
+/// Дозапись готовой расшифровки в журнал пользователя (см. journal.rs).
+/// Запись приходит уже собранной markdown-строкой с таймстампом — локальное
+/// время знает фронтенд, а не Rust std (см. src/journal.ts). Путь берётся
+/// из настроек, а не из аргумента: команда с произвольным путём была бы
+/// «запиши что угодно куда угодно».
+#[tauri::command]
+pub fn append_journal(state: State<'_, AppState>, entry: String) -> Result<(), String> {
+    let path = {
+        let s = state.settings.lock().unwrap();
+        s.journal_path.trim().to_string()
+    };
+    if path.is_empty() {
+        return Err("Set a journal file in Settings first.".to_string());
+    }
+    crate::journal::append(std::path::Path::new(&path), &entry)
+        .map_err(|_| "Couldn't write to the journal file. Check the path in Settings.".to_string())
+}
+
 /// Право на отправку синтетических нажатий — тот же самый источник правды,
 /// что использует `paste_text` перед реальной попыткой (см.
 /// `macos::has_accessibility_permission`). Фронтенд зовёт эту команду ДО
@@ -874,6 +1203,21 @@ pub fn begin_recording(app: &AppHandle) {
     // круг через главный поток, и держать на нём чужой мьютекс незачем.
     let append = is_append_session(app);
 
+    // Гейт лицензии — единственная точка: сюда приходят и хоткей, и клик по
+    // микрофону. Истёкший триал блокирует только НОВУЮ запись; уже
+    // расшифрованный текст, настройки и активация ключа работают как
+    // работали — приложение не берёт текст пользователя в заложники.
+    if let Ok(dir) = data_dir(app) {
+        if matches!(
+            crate::license::status(&dir, license_now_ms(), crate::license::PUBLIC_KEY_HEX),
+            crate::license::LicenseStatus::Expired
+        ) {
+            let _ = app.emit_to("overlay", "license:expired", ());
+            show_overlay(app);
+            return;
+        }
+    }
+
     let state = app.state::<AppState>();
     let mut slot = state.recorder.lock().unwrap();
     if slot.is_some() {
@@ -924,13 +1268,18 @@ pub fn begin_recording(app: &AppHandle) {
         return;
     }
     // Устройство выбирается один раз, на старте записи. Менять его посреди
-    // записи нельзя — выбор применяется к следующей (см. бриф). Флаг
-    // эхоподавления читается там же и так же применяется к следующей записи.
-    let (preferred, echo_cancel) = {
+    // записи нельзя — выбор применяется к следующей (см. бриф). Флаг mute
+    // читается там же и применяется к этой же записи.
+    let (preferred, mute_output) = {
         let s = state.settings.lock().unwrap();
-        (s.input_device.clone(), s.echo_cancellation)
+        (s.input_device.clone(), s.mute_system_audio)
     };
-    match Recorder::start(preferred, echo_cancel) {
+    // Глушим выход ДО старта захвата: первые миллисекунды записи — ровно
+    // те, где чужой звук ещё играет. Отказ тихий (см. system_audio.rs).
+    if mute_output {
+        crate::system_audio::mute_default_output();
+    }
+    match Recorder::start(preferred) {
         Ok(rec) => {
             // Сохранённого устройства не нашлось — пишем с умолчания, но
             // молчать об этом нельзя: человек будет думать, что диктует в
@@ -981,6 +1330,9 @@ pub fn begin_recording(app: &AppHandle) {
             let _ = app.emit_to("overlay", "rec:start", RecStartPayload { append });
         }
         Err(e) => {
+            // Запись не началась — тишина ей не принадлежит: возвращаем
+            // звук сразу, end_recording на этой ветке не позовут.
+            crate::system_audio::restore_muted_outputs();
             // cpal отдаёт причину по-английски — в лог. Пользователю — один
             // из двух текстов в зависимости от причины (I8): отсутствие
             // устройства не лечится выдачей разрешения, которое, возможно,
@@ -1027,6 +1379,10 @@ pub struct TranscriptPayload {
 
 /// Общая логика остановки записи и запуска расшифровки в фоновом потоке.
 pub fn end_recording(app: &AppHandle) {
+    // Звук возвращаем первым делом и БЕЗУСЛОВНО (не глушили — вызов
+    // не тронет ничего, см. restore_muted_outputs): дальше функция может
+    // выйти рано, а тишина не должна пережить запись ни на одной ветке.
+    crate::system_audio::restore_muted_outputs();
     let state = app.state::<AppState>();
     let Some(rec) = state.recorder.lock().unwrap().take() else {
         return; // не писали — нечего останавливать
@@ -1662,6 +2018,12 @@ impl CaptureOps for RealCaptureOps<'_> {
     fn sleep(&self, d: std::time::Duration) {
         std::thread::sleep(d);
     }
+
+    fn read_markdown(&self) -> Option<String> {
+        // HTML-вариант выделения (Slack, почта, заметки) → Markdown. Нет
+        // HTML — `None`, и захват остаётся на плоском тексте.
+        macos::read_pasteboard_html().map(|html| crate::format::html_to_markdown(&html))
+    }
 }
 
 /// Какой PID запомнить как цель вставки ПОСЛЕ попытки захвата.
@@ -1769,7 +2131,8 @@ fn try_capture_selection(app: &AppHandle, state: &AppState) -> Result<(), Captur
         outcome.restored_clipboard
     );
 
-    follow_to_main_window(app.clone(), outcome.text).map_err(CaptureFailure::Failed)
+    follow_to_main_window_rich(app.clone(), outcome.text, outcome.was_rich)
+        .map_err(CaptureFailure::Failed)
 }
 
 /// Регистрирует глобальный хоткей захвата. Отдельно от `register_hotkey`:
@@ -1850,8 +2213,22 @@ pub fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
     app.clipboard().write_text(text).map_err(|e| e.to_string())
 }
 
+/// В каком виде вставлять. Текст в окне всегда Markdown (при rich-захвате) либо
+/// плоский (диктовка), отсюда три выхода: `Verbatim` — записать как есть
+/// (плоская диктовка или Markdown-исходник по выбору), `Plain` — срезать
+/// разметку, `Rich` — развернуть Markdown в живой HTML. Пришло из JS строкой;
+/// отсутствие (старые вызовы, оверлей) — `Verbatim`.
+#[derive(Deserialize, Clone, Copy, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PasteFormat {
+    #[default]
+    Verbatim,
+    Plain,
+    Rich,
+}
+
 #[tauri::command]
-pub fn paste_text(app: AppHandle, text: String) -> Result<(), String> {
+pub fn paste_text(app: AppHandle, text: String, format: Option<PasteFormat>) -> Result<(), String> {
     // Тот же вход к буферу обмена, что и у захвата, и по той же причине:
     // вставка кладёт в буфер свой текст, а идущий захват как раз опрашивает
     // счётчик изменений. Столкнувшись, они ломают друг друга насквозь —
@@ -1870,9 +2247,28 @@ pub fn paste_text(app: AppHandle, text: String) -> Result<(), String> {
     // начнёт мешать.
     let previous = app.clipboard().read_text().ok();
 
-    app.clipboard()
-        .write_text(text)
-        .map_err(|e| e.to_string())?;
+    // Текст в окне — Markdown (rich-захват) или плоский (диктовка). Формат
+    // решает, что уйдёт в буфер: как есть, без разметки или живым HTML. Для
+    // HTML кладём и plain-fallback (alt_text) — приложения без поддержки HTML
+    // возьмут его. Любой сбой конвертации внутри format.rs невозможен (функции
+    // тотальны), так что отката в plain тут не требуется.
+    match format.unwrap_or_default() {
+        PasteFormat::Verbatim => app
+            .clipboard()
+            .write_text(text)
+            .map_err(|e| e.to_string())?,
+        PasteFormat::Plain => app
+            .clipboard()
+            .write_text(crate::format::markdown_to_plain(&text))
+            .map_err(|e| e.to_string())?,
+        PasteFormat::Rich => app
+            .clipboard()
+            .write_html(
+                crate::format::markdown_to_html(&text),
+                Some(crate::format::markdown_to_plain(&text)),
+            )
+            .map_err(|e| e.to_string())?,
+    }
 
     let pid = *app.state::<AppState>().prev_app_pid.lock().unwrap();
 
@@ -2007,6 +2403,10 @@ pub fn open_privacy_pane(pane: macos::PrivacyPane) {
 #[serde(rename_all = "camelCase")]
 pub struct FollowPayload {
     pub text: String,
+    /// Было ли у исходного выделения форматирование. Главное окно по этому
+    /// флагу показывает (или прячет) выбор формата вставки: диктовка и текст
+    /// без разметки приходят с `false`, и выбор не предлагается.
+    pub was_rich: bool,
 }
 
 /// Показывает главное окно и поднимает его наверх. На macOS временно
@@ -2056,7 +2456,16 @@ pub fn hide_main_window(app: AppHandle) {
 /// этот путь restore-логики тут не нужен и был бы ошибкой.
 #[tauri::command]
 pub fn follow_to_main_window(app: AppHandle, text: String) -> Result<(), String> {
-    app.emit_to("main", "follow:text", FollowPayload { text })
+    // Команда с фронта (кнопка Follow в оверлее) — это диктовка без разметки,
+    // поэтому was_rich=false. Rich-ветка приходит из захвата через
+    // `follow_to_main_window_rich` ниже.
+    follow_to_main_window_rich(app, text, false)
+}
+
+/// Общий путь показа главного окна с текстом. Отдельно от команды, чтобы захват
+/// мог передать `was_rich`, а граница команд осталась простой (`text` только).
+pub fn follow_to_main_window_rich(app: AppHandle, text: String, was_rich: bool) -> Result<(), String> {
+    app.emit_to("main", "follow:text", FollowPayload { text, was_rich })
         .map_err(|e| e.to_string())?;
     show_main_window(&app);
     if let Some(w) = app.get_webview_window("overlay") {

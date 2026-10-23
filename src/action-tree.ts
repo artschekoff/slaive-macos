@@ -72,8 +72,17 @@ function leaf(
 // Системные промпты — по одному на действие, коротко и однозначно: модель
 // должна вернуть ТОЛЬКО текст замены, без комментариев и кавычек вокруг
 // него — MainWindow подставляет ответ в поле как есть (см. run_ai_action).
+// Захваченный rich-текст приходит в поле как Markdown (см. capture.rs /
+// format.rs). Действия, которые правят текст НЕ меняя его структуры, обязаны
+// сохранить разметку — иначе round-trip в rich при вставке теряет смысл.
+// Summarize/Generate это не добавляем намеренно: они порождают новую структуру,
+// а не правят исходную.
+const PRESERVE_MARKDOWN =
+  ' If the text uses Markdown formatting (code blocks, inline code, bold, italics, lists, links), keep that formatting intact in your reply.'
+
 const FIX_SYSTEM =
-  'You fix grammar, spelling and punctuation in the given text. Reply with only the corrected text, nothing else — no explanations, no quotes around it.'
+  'You fix grammar, spelling and punctuation in the given text. Reply with only the corrected text, nothing else — no explanations, no quotes around it.' +
+  PRESERVE_MARKDOWN
 
 // Shorten и Summarize — РАЗНЫЕ работы над надиктованным текстом, и вся
 // разница держится на этих двух промптах: первый оставляет текст текстом
@@ -86,7 +95,8 @@ const SHORTEN_SYSTEM =
   'repetition and padding; keep the author’s own words, tone and order of ideas, so the ' +
   'result still reads as their sentences with the slack taken out. Do not restructure it ' +
   'into a list, do not generalize, and do not drop any point they made. Reply with only ' +
-  'the tightened text, nothing else — no explanations, no quotes around it.'
+  'the tightened text, nothing else — no explanations, no quotes around it.' +
+  PRESERVE_MARKDOWN
 const SUMMARIZE_SYSTEM =
   'You summarize the given text: work out what it is actually about and state that ' +
   'substance in your own words. Rephrasing freely is expected — do not try to preserve the ' +
@@ -96,9 +106,11 @@ const SUMMARIZE_SYSTEM =
   'preamble, no quotes around it.'
 
 const translateSystem = (language: string) =>
-  `You translate the given text to ${language}. Reply with only the translation, nothing else — no explanations, no quotes around it.`
+  `You translate the given text to ${language}. Reply with only the translation, nothing else — no explanations, no quotes around it.` +
+  PRESERVE_MARKDOWN
 const ASK_AI_SYSTEM =
-  'You edit or answer questions about the given text as the user instructs, and reply with only the result text to use in place of the original — no explanations, no quotes around it.'
+  'You edit or answer questions about the given text as the user instructs, and reply with only the result text to use in place of the original — no explanations, no quotes around it.' +
+  PRESERVE_MARKDOWN
 
 // Generate — обратная роль текста поля: не объект действия, а сама
 // инструкция. Пользователь нажал хоткей захвата без выделения (курсор стоит

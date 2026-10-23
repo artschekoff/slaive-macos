@@ -35,6 +35,72 @@ pub fn frontmost_pid() -> Option<i32> {
         .and_then(|s| s.parse().ok())
 }
 
+/// Статус разрешения на микрофон: `Some(true)` — выдано, `Some(false)` —
+/// отказано (или ограничено политикой), `None` — macOS ещё не спрашивала.
+/// Единственный честный способ УЗНАТЬ статус, не дёргая запись, —
+/// AVFoundation; сам системный промпт показывает не эта функция, а первая
+/// реальная попытка записи (cpal) — так спрашивает тот же код, что и пишет.
+pub fn microphone_permission() -> Option<bool> {
+    use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
+    let media = unsafe { AVMediaTypeAudio }?;
+    let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(media) };
+    match status {
+        AVAuthorizationStatus::Authorized => Some(true),
+        AVAuthorizationStatus::NotDetermined => None,
+        _ => Some(false),
+    }
+}
+
+/// Проба микрофона для окна Setup. `requestAccess` ходит к tccd мимо
+/// внутрипроцессного кэша — а `authorizationStatus` выше кэшируется: право
+/// спросил прогрев VPIO на старте, пользователь разрешил, но статус в том
+/// же запуске так и отвечал NotDetermined до перезапуска (наблюдалось
+/// вживую). На уже решённом праве промпт не показывается — ответ приходит
+/// сразу; на действительно не спрошенном показывает системный диалог и
+/// ждёт ответа — то же соглашение, что у automation_permitted ниже:
+/// звать только из setup_report, где диалог уместен.
+pub fn microphone_permission_probe() -> bool {
+    use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
+    let Some(media) = (unsafe { AVMediaTypeAudio }) else {
+        return false;
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handler = block2::RcBlock::new(move |granted: objc2::runtime::Bool| {
+        let _ = tx.send(granted.as_bool());
+    });
+    unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(media, &handler) };
+    rx.recv().unwrap_or(false)
+}
+
+/// Проба права Automation (osascript → System Events): безвредный счёт
+/// процессов. Отдельного API «спросить статус» у macOS нет вовсе, поэтому
+/// проба — единственный способ. Если право ещё не определено, ЭТОТ вызов
+/// сам показывает системный диалог и блокируется до ответа — звать только
+/// из контекста, где диалог уместен (окно Setup), не из горячего пути.
+pub fn automation_permitted() -> bool {
+    osascript("tell application \"System Events\" to count processes").is_ok()
+}
+
+/// Панель System Settings с разрешением на микрофон — для кнопки Resolve в
+/// окне Setup, когда в праве уже отказано (повторно macOS не спрашивает).
+pub fn open_microphone_pane() {
+    let url = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone";
+    let _ = Command::new("/usr/bin/open").arg(url).status();
+}
+
+/// Открывает URL в браузере пользователя по умолчанию. `/usr/bin/open` —
+/// системный способ macOS; сетевого вызова из самого приложения здесь нет.
+pub fn open_url(url: &str) -> anyhow::Result<()> {
+    let status = Command::new("/usr/bin/open")
+        .arg(url)
+        .status()
+        .context("couldn't run open")?;
+    if !status.success() {
+        return Err(anyhow!("open exited with {status}"));
+    }
+    Ok(())
+}
+
 /// Возвращает фокус приложению по его PID.
 pub fn activate_pid(pid: i32) -> anyhow::Result<()> {
     osascript(&format!(
@@ -209,6 +275,27 @@ pub fn pasteboard_change_count() -> i64 {
     // generalPasteboard() возвращает синглтон, живущий столько же, сколько
     // процесс; changeCount() — обычное чтение счётчика без побочных эффектов.
     NSPasteboard::generalPasteboard().changeCount() as i64
+}
+
+/// HTML-вариант буфера обмена, если он там есть. Rich-редакторы (Slack, почта,
+/// заметки) при копировании кладут рядом с плоским текстом `public.html` со
+/// всей структурой (жирный, инлайн-код, код-блоки, списки). Плагин буфера умеет
+/// только `read_text` и этот слой теряет; читаем флавор напрямую у NSPasteboard.
+/// `None` — HTML-варианта нет (скопировали из приложения без разметки) либо он
+/// пустой; тогда захват остаётся на плоском тексте, как раньше.
+pub fn read_pasteboard_html() -> Option<String> {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeHTML};
+    let pasteboard = NSPasteboard::generalPasteboard();
+    // stringForType берёт &NSPasteboardType; статик-константа типа объявлена в
+    // extern-блоке objc2, доступ к ней — unsafe, само чтение буфера побочных
+    // эффектов не имеет (счётчик changeCount не двигает).
+    let html = unsafe { pasteboard.stringForType(NSPasteboardTypeHTML) }?;
+    let html = html.to_string();
+    if html.trim().is_empty() {
+        None
+    } else {
+        Some(html)
+    }
 }
 
 // Единственный достоверный способ узнать, есть ли право на отправку нажатий.

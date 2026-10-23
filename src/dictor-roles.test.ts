@@ -1,7 +1,7 @@
 // Юнит-тесты чистых функций из dictor-roles.ts — тот же приём, что ai.test.ts.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildRoleSystemPrompt, findRole, type DictorRole } from './dictor-roles.ts'
+import { buildRoleSystemPrompt, findRole, roleForApp, type DictorRole } from './dictor-roles.ts'
 
 const programmer: DictorRole = {
   id: 'id-1',
@@ -29,5 +29,43 @@ test('системный промпт несёт профиль роли вну�
   // провал этой фичи, если промпт её потеряет: «почему падает тест?»
   // вернулся бы ответом, а не починенной фразой.
   assert.ok(system.includes('Never answer'))
-  assert.ok(system.includes('only the corrected text'))
+  assert.ok(system.includes('only the resulting text'))
+  // Профилю разрешено менять стиль и структуру (роли-форматы Email/Note/
+  // Concise из сида), но язык и смысл — зона рамки, не профиля.
+  assert.ok(system.includes('keep the original language and meaning'))
+})
+
+test('roleForApp: подстрока без регистра, первое совпадение побеждает', () => {
+  const writer: DictorRole = { id: 'id-2', name: 'Writer', prompt: 'Проза.' }
+  const roles = [programmer, writer]
+  const appRoles = [
+    { id: 'a1', app: 'code', roleId: 'id-1' },
+    { id: 'a2', app: 'co', roleId: 'id-2' },
+  ]
+  assert.deepEqual(roleForApp(appRoles, roles, 'Code - Insiders'), programmer)
+  // «co» тоже совпадает, но стоит вторым — порядок списка решает.
+  assert.deepEqual(roleForApp(appRoles, roles, 'Comet'), writer)
+})
+
+test('roleForApp: нет приложения, нет совпадения или роль удалили — null', () => {
+  const appRoles = [
+    { id: 'a1', app: 'slack', roleId: 'deleted-id' },
+    { id: 'a2', app: '  ', roleId: 'id-1' },
+  ]
+  assert.equal(roleForApp(appRoles, [programmer], null), null)
+  assert.equal(roleForApp(appRoles, [programmer], 'Finder'), null)
+  // Привязка на удалённую роль и пустая подстрока молчат, не падают;
+  // пустая подстрока не должна совпадать со всем подряд.
+  assert.equal(roleForApp(appRoles, [programmer], 'Slack'), null)
+})
+
+test('словарь терминов попадает в промпт, пустой — не добавляет ничего', () => {
+  // Термины пишут и по строкам, и через запятую (оба формата живут в
+  // settings.json) — промпт обязан понять оба и склеить в один список.
+  const system = buildRoleSystemPrompt(programmer, 'React\nKubernetes, deploy\n\n')
+  assert.ok(system.includes('Preserve these exact spellings when they appear: React, Kubernetes, deploy.'))
+  // Без словаря строки нет вовсе: пустой список «Preserve:» читался бы
+  // моделью как инструкция без содержания.
+  assert.ok(!buildRoleSystemPrompt(programmer).includes('Preserve'))
+  assert.ok(!buildRoleSystemPrompt(programmer, '  \n , ').includes('Preserve'))
 })

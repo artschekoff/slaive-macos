@@ -8,6 +8,11 @@ use tauri_plugin_global_shortcut::Shortcut;
 
 pub struct AppState {
     pub settings: Mutex<Settings>,
+    /// Окно Setup открыто автоматикой старта, а не рукой из трея: такому
+    /// окну разрешено спрятаться самому, когда обязательные проверки
+    /// дозеленеют (см. SetupWindow.tsx). Открытое человеком — не прячется:
+    /// человек пришёл смотреть.
+    pub setup_auto_opened: Mutex<bool>,
     /// PID приложения, которое было активным в момент нажатия хоткея.
     /// Используется при вставке текста, чтобы вернуть фокус в исходное окно.
     pub prev_app_pid: Mutex<Option<i32>>,
@@ -70,6 +75,7 @@ impl AppState {
     pub fn new(settings: Settings) -> Self {
         Self {
             settings: Mutex::new(settings),
+            setup_auto_opened: Mutex::new(false),
             prev_app_pid: Mutex::new(None),
             clipboard: ClipboardGate::default(),
             recorder: Mutex::new(None),

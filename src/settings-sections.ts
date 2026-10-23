@@ -6,14 +6,15 @@
 /** Ключ настройки в том виде, в каком он лежит в settings.json (camelCase). */
 export type SettingKey =
   | 'inputDevice'
+  | 'muteSystemAudio'
   | 'micGain'
-  | 'echoCancellation'
   | 'highPassFilter'
   | 'modelPath'
   | 'vadModelPath'
   | 'language'
   | 'vadThreshold'
   | 'dictionary'
+  | 'smartReplaces'
   | 'hotkey'
   | 'pasteShortcut'
   | 'copyShortcut'
@@ -31,6 +32,8 @@ export type SettingKey =
   | 'translateLanguages'
   | 'dictorRoles'
   | 'dictorRole'
+  | 'appRoles'
+  | 'journalPath'
   | 'windowOpacity'
 
 export type SectionId =
@@ -40,6 +43,7 @@ export type SectionId =
   | 'shortcuts'
   | 'ai'
   | 'appearance'
+  | 'license'
 
 export type Section = {
   id: SectionId
@@ -86,7 +90,7 @@ export const SECTIONS: readonly Section[] = [
     id: 'audio',
     title: 'Audio',
     summary: 'What goes into the microphone.',
-    settings: ['inputDevice', 'echoCancellation', 'highPassFilter', 'micGain'],
+    settings: ['inputDevice', 'muteSystemAudio', 'highPassFilter', 'micGain'],
   },
   {
     id: 'models',
@@ -98,7 +102,10 @@ export const SECTIONS: readonly Section[] = [
     id: 'recognition',
     title: 'Recognition',
     summary: 'How the sound turns into text.',
-    settings: ['language', 'vadThreshold', 'dictionary'],
+    // smartReplaces — здесь, а не в AI: замены локальные, без единого
+    // сетевого запроса, и правят они то, как произнесённое становится
+    // текстом, — ровно тема раздела.
+    settings: ['language', 'vadThreshold', 'dictionary', 'smartReplaces'],
   },
   {
     id: 'shortcuts',
@@ -127,13 +134,25 @@ export const SECTIONS: readonly Section[] = [
     // dictorRole (активная роль) правится селектором в панели, но живёт
     // в том же разделе, что и список ролей: это тоже «что происходит с
     // текстом после распознавания», и раздел — место, где её ищут глазами.
-    settings: ['ai', 'translateLanguages', 'dictorRoles', 'dictorRole'],
+    // journalPath — тоже здесь: сеть журналу не нужна, но подпись раздела —
+    // «что происходит с текстом после распознавания» — ровно про него, и
+    // отдельный раздел из одного поля был бы хуже (ср. довод про Appearance).
+    settings: ['ai', 'translateLanguages', 'dictorRoles', 'dictorRole', 'appRoles', 'journalPath'],
   },
   {
     id: 'appearance',
     title: 'Appearance',
     summary: 'How the windows look on screen.',
     settings: ['windowOpacity'],
+  },
+  {
+    // Лицензия хранится не в settings.json (license.json + Paddle), поэтому
+    // список settings пуст: раздел — интерфейс к license.rs, а не к полям
+    // настроек. Последний в столбце: сюда заходят один раз.
+    id: 'license',
+    title: 'License',
+    summary: 'Trial, license key and purchase.',
+    settings: [],
   },
 ]
 

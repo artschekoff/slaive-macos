@@ -53,6 +53,45 @@ body {
 
 /* Столбец разделов — чуть темнее панели содержимого, разделён волосяной
    линией, как сайдбары системных приложений. */
+/* ===== Окно Setup =====
+   Чек-лист готовности: строка = знак + текст + кнопка-починка. Шасси то же,
+   что у настроек (.settings), но без левого столбца — разделов здесь нет. */
+/* min-height на вьюпорт: шасси тянется по содержимому, и короткий контент
+   (поздравление из трёх строк) оставлял под собой голый белый фон окна. */
+.setup {
+  display: block;
+  padding: 20px 24px;
+  overflow-y: auto;
+  box-sizing: border-box;
+  min-height: 100vh;
+}
+.setup-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+.setup-row:last-of-type { border-bottom: none; }
+.setup-mark { width: 18px; flex-shrink: 0; text-align: center; font-weight: 700; color: #9a9aa0; }
+.setup-row.ok .setup-mark { color: #30d158; }
+.setup-row.fail .setup-mark { color: #ff453a; }
+.setup-text { flex: 1; min-width: 0; }
+.setup-title { font-weight: 600; margin-bottom: 2px; }
+.setup-row button { flex-shrink: 0; align-self: center; }
+/* Поздравление в конце онбординга: контент по центру окна, без списка.
+   Высота — через min-height .setup выше: height:100% здесь не работал,
+   родители (#root/body) высоту не задают. */
+.setup-done {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+}
+.setup-done .hint { max-width: 380px; }
+
 .settings-nav {
   display: flex;
   flex-direction: column;
@@ -282,6 +321,10 @@ body {
 /* Выпадающий список с кнопкой справа (устройство записи + Refresh). */
 .row-with-button { display: flex; gap: 8px; align-items: center; }
 .row-with-button select { flex: 1; min-width: 0; }
+/* Пара Smart Replace: два поля делят строку поровну, кнопке — сколько
+   нужно. Отступ снизу разводит пары списка, которые иначе слипаются. */
+.replace-row { margin-bottom: 8px; }
+.replace-row input { flex: 1; min-width: 0; }
 
 /* ===== Менеджер моделей (раздел Models) =====
    Строка на модель: слева название, размер и чем она отличается на практике,
@@ -1077,10 +1120,12 @@ button.primary {
    условностей больше, чем экономило бы строк. */
 .main-window {
   height: 100vh;
-  padding: 16px;
+  /* Компактнее, чем 16/12 у панели: хром окна ужат по просьбе пользователя,
+     сэкономленное достаётся полю текста (flex:1 у .mw-editor-row). */
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   /* Для .modal-backdrop (position: absolute; inset: 0) — тот же
      приём, что у .overlay: модальный слой накрывает окно, а не вьюпорт. */
   position: relative;
@@ -1130,6 +1175,45 @@ button.primary {
   flex-shrink: 0;
 }
 
+/* Выбор формата вставки (Rich/Markdown/Plain) — только для rich-захвата.
+   Забирает авто-отступ себе и уводит весь правый блок (формат+Copy+Paste)
+   вправо; Copy тогда прижимается обычным gap ряда, а не своим auto. */
+.mw-format {
+  margin-left: auto;
+  display: inline-flex;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.mw-format + .mw-copy {
+  margin-left: 0;
+}
+
+/* Сегменты: плоские, без собственной заливки (её даёт выбранный), разделены
+   тонкой линией. Палитра тёмного корпуса (как .chassis button), но намеренно
+   легче кнопок действия — это переключатель режима, а не действие над текстом. */
+.main-window button.mw-format-btn {
+  padding: 3px 9px;
+  font-size: 11px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: rgba(242, 242, 247, 0.55);
+  box-shadow: none;
+}
+.main-window button.mw-format-btn + .mw-format-btn {
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
+}
+.main-window button.mw-format-btn:hover:not(.selected) {
+  background: rgba(255, 255, 255, 0.12);
+  color: #f2f2f7;
+}
+.main-window button.mw-format-btn.selected {
+  background: #0a84ff;
+  color: #fff;
+}
+
 /* Полоса возврата над сеткой действий. Оформлена намеренно НЕ как кнопка
    действия: у тех заливка (.chassis button), здесь её нет — приглушённый
    текст со стрелкой, который читается как «шаг назад», а не как «сделать
@@ -1139,7 +1223,7 @@ button.primary {
 .mw-trail {
   display: flex;
   align-items: center;
-  min-height: 20px;
+  min-height: 16px;
 }
 
 .main-window button.mw-back {
@@ -1513,7 +1597,7 @@ button.primary {
 
 .main-window .action-grid[role='listbox'] button {
   width: auto;
-  padding: 7px 14px;
+  padding: 5px 12px;
   font-size: 13px;
   border-radius: 999px;
 }
@@ -1617,7 +1701,7 @@ button.primary {
 .mw-menu-inner {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 /* Строка сообщения над меню — одна геометрия на два смысла: ошибка действия
@@ -1830,6 +1914,32 @@ button.primary {
   box-shadow: inset 0 0 0 1px rgba(255, 214, 10, 0.25);
 }
 
+/* Индикатор ИИ-правки: бегущий туда-сюда сегмент во всю ширину панели —
+   тот же синий, что у Paste и .mw-recent-run («сейчас произойдёт действие»).
+   Высота мала, но движение делает его заметным — ровно жалоба, из-за
+   которой он сменил тихий чип «Polishing…». */
+.overlay .refine-bar {
+  position: relative;
+  height: 3px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.10);
+}
+.overlay .refine-bar-thumb {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 30%;
+  height: 100%;
+  border-radius: 2px;
+  background: #0a84ff;
+  animation: refine-shuttle 0.9s ease-in-out infinite alternate;
+}
+@keyframes refine-shuttle {
+  from { left: 0; }
+  to { left: 70%; }
+}
+
 /* Строка про язык расшифровки: ярлык слева, селектор принудительного выбора
    справа (см. Overlay.tsx). Плотная и тихая — это метаданные текста, а не
    ряд действий над ним: тот стоит ниже и выглядит как кнопки. */
@@ -1868,7 +1978,8 @@ button.primary {
    материал, что у полей настроек (--glass-field-*), только плотнее — в
    панели всё плотнее. */
 .overlay .lang-force {
-  margin-left: auto;
+  /* Без margin-left:auto: селектор стоит вплотную к своему ярлыку, а не у
+     противоположного края панели — пара читается парой. */
   flex-shrink: 0;
   background: var(--glass-field-bg);
   border: none;
@@ -1878,6 +1989,22 @@ button.primary {
   font-size: 11px;
   font-family: inherit;
   box-shadow: var(--glass-field-shadow);
+}
+
+/* Пара «Role + селектор» — одно целое сразу за парой «Redo as». Без
+   margin-left:auto: порядок в строке константный, и роль не прыгает от
+   края к краю, когда соседи появляются и исчезают. */
+.overlay .role-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Факт «Detected/Forced: язык» — у правого края строки: появляется после
+   расшифровки и там никого не сдвигает. */
+.overlay .lang-chip.lang-report {
+  margin-left: auto;
 }
 
 .overlay .lang-force:disabled {

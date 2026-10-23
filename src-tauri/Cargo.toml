@@ -14,10 +14,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 cpal = "0.15"
-# Та же версия, что тянет cpal (см. Cargo.lock) — дубликата в дереве нет.
-# Нужен ради Voice Processing I/O (системное эхоподавление macOS), которого
-# cpal не умеет.
-coreaudio-rs = "0.11"
+# Уже в дереве через cpal — здесь только прямой доступ ради mute выходного
+# устройства на время записи (см. system_audio.rs): ни одной новой единицы
+# компиляции, версия та же, что в Cargo.lock.
+coreaudio-sys = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["fs", "io-util", "sync", "macros"] }
@@ -45,11 +45,37 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 # "keychain" (классический SecKeychain, видимый в Keychain Access.app).
 # Проверено `cargo tree`.
 keyring = "4.2.0"
+# Ровно один вызов — AVCaptureDevice.authorizationStatus(for: .audio) для
+# строки «Microphone» в окне Setup (см. macos::microphone_permission):
+# другого способа УЗНАТЬ статус разрешения, не дёргая запись, у macOS нет.
+# Набор фич минимальный по тому же доводу, что у objc2-app-kit выше.
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "AVCaptureDevice",
+    "AVMediaFormat",
+    "block2",
+] }
+# Обе и так в дереве (их тянут objc2-app-kit/av-foundation) — здесь только
+# прямой доступ ради completion-блока микрофонной пробы в macos.rs:
+# block2 собирает Objective-C блок, objc2 даёт его тип Bool. Версии те же,
+# что уже в Cargo.lock, — ни одной новой единицы компиляции.
+block2 = "0.6"
+objc2 = "0.6"
+# Проверка лицензионных ключей офлайн (см. license.rs): подпись Ed25519,
+# публичный ключ зашит в бинарь, сети не нужно. default-features = false
+# отрезает rand и прочее — для verify/sign хватает std.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast"] }
 # Файловый лог диагностики (см. src-tauri/src/main.rs) — пишет в
 # app_log_dir() (~/Library/Logs/net.slaive.app на macOS). `log` — сами
 # макросы (warn!/error!/info!), tauri-plugin-log — их бэкенд с ротацией.
 tauri-plugin-log = "2"
 log = "0.4"
+# Round-trip форматирования захваченного текста (см. format.rs): rich-выделение
+# из чужого приложения приходит как HTML, храним и правим его как Markdown, а
+# вставляем обратно в одном из трёх форматов. pulldown-cmark — md→html и md→plain
+# (разбор событий), html2md — обратный ход html→md. Оба лёгкие, без C-зависимостей.
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+html2md = "0.2"
 
 [profile.release]
 # Полный strip убирал таблицу символов целиком: крэш-репорты macOS

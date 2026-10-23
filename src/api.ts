@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { AiSettings } from './ai.ts'
-import type { DictorRole } from './dictor-roles.ts'
+import type { AppRole, DictorRole } from './dictor-roles.ts'
+import type { SmartReplace } from './smart-replace.ts'
 import type { RecentAction } from './recent-actions.ts'
 
 export type Settings = {
@@ -73,14 +74,10 @@ export type Settings = {
   /** Recording device name as `cpal` reports it. `null` = "System default",
    *  meaning follow the system — NOT "pin to whatever is default today". */
   inputDevice: string | null
-  /** System echo cancellation (macOS Voice Processing I/O): subtracts what
-   *  the Mac itself is playing from the mic signal, so a video in the
-   *  background doesn't end up in the dictation. Apple's voice processing
-   *  also applies its own noise suppression and gain control, which slightly
-   *  changes the recording's tone — hence the switch. Default on; if the
-   *  voice unit fails to start, recording silently falls back to the plain
-   *  path (see `Recorder::start` in audio.rs). */
-  echoCancellation: boolean
+  /** Mute the system output while recording (see system_audio.rs): a
+   *  playing video or music doesn't end up in the dictation. Replaces the
+   *  removed VPIO echo cancellation — prevention instead of subtraction. */
+  muteSystemAudio: boolean
   /** High-pass filter at 80 Hz applied before speech detection and
    *  transcription: cuts room rumble and fan hum, which carry no speech.
    *  Never applied to the raw recording (Play, history) — like `micGain`,
@@ -105,6 +102,15 @@ export type Settings = {
   /** id of the active role, or `null` = editing off (the default): the
    *  whisper text goes to the user untouched and nothing hits the network. */
   dictorRole: string | null
+  /** Smart Replace pairs, applied to the finished transcript on the
+   *  frontend (see smart-replace.ts). Empty = the feature isn't set up. */
+  smartReplaces: SmartReplace[]
+  /** App → role bindings for the automatic dictor role (see roleForApp in
+   *  dictor-roles.ts). Empty = the feature isn't set up. */
+  appRoles: AppRole[]
+  /** Path to the user's markdown journal file. Empty = the feature is off
+   *  and the panel shows no Journal button. */
+  journalPath: string
 }
 
 export type SettingsResponse = Settings & {
@@ -238,7 +244,12 @@ export const getLastRecording = () => invoke<number[] | null>('get_last_recordin
 export const setOverlayHasText = (hasText: boolean) =>
   invoke<void>('set_overlay_has_text', { hasText })
 
-export const pasteText = (text: string) => invoke<void>('paste_text', { text })
+// В каком виде вставлять. 'verbatim' — как есть (диктовка или Markdown-исходник),
+// 'plain' — срезать разметку, 'rich' — развернуть Markdown в живой HTML. См.
+// PasteFormat в commands.rs. Отсутствие аргумента (оверлей) — 'verbatim'.
+export type PasteFormat = 'verbatim' | 'plain' | 'rich'
+export const pasteText = (text: string, format: PasteFormat = 'verbatim') =>
+  invoke<void>('paste_text', { text, format })
 export const copyText = (text: string) => invoke<void>('copy_text', { text })
 
 export type PrivacyPane = 'automation' | 'accessibility'
@@ -278,6 +289,66 @@ export const cancelAiAction = () => invoke<void>('cancel_ai_action')
  *  `null` turns the AI pass off. Persists and emits `settings:changed`. */
 export const setDictorRole = (role: string | null) =>
   invoke<void>('set_dictor_role', { role })
+
+/** Appends a finished transcript to the user's markdown journal. The entry
+ *  arrives fully formatted (see journal.ts) — the backend only appends; the
+ *  file path comes from settings, never from the caller. */
+export const appendJournal = (entry: string) => invoke<void>('append_journal', { entry })
+
+/** Mirror of `LicenseStatus` in license.rs (serde tag = "state"). */
+export type LicenseStatus =
+  | { state: 'licensed' }
+  | { state: 'trial'; daysLeft: number }
+  | { state: 'expired' }
+
+/** Current license/trial state. The first call of an installation starts
+ *  the trial clock. */
+export const licenseStatus = () => invoke<LicenseStatus>('license_status')
+
+/** Validates and stores a license key; resolves with the fresh status or
+ *  rejects with a human-readable reason. */
+export const activateLicense = (key: string) =>
+  invoke<LicenseStatus>('activate_license', { key })
+
+/** Opens the Paddle checkout page in the default browser. */
+export const openBuyPage = () => invoke<void>('open_buy_page')
+
+/** One row of the Setup window (mirror of `SetupCheck` in commands.rs). */
+export type SetupCheck = {
+  id: string
+  title: string
+  detail: string
+  ok: boolean
+  required: boolean
+  /** Label for the fix button; absent when the check passed. */
+  action: string | null
+}
+
+/** Setup window report: `initial` is true until the onboarding was
+ *  completed once (the OK button writes the marker). */
+export type SetupReport = {
+  initial: boolean
+  /** The window was opened by startup automation (not from the tray) and
+   *  may hide itself once every required check passes. */
+  autoOpened: boolean
+  checks: SetupCheck[]
+}
+
+/** All setup checks at once. The Automation probe inside may show the
+ *  system consent dialog and wait for the answer — call this only from the
+ *  Setup window, where that dialog is expected. */
+export const setupReport = () => invoke<SetupReport>('setup_report')
+
+/** Finishes the one-time onboarding: persists the marker and hides the
+ *  Setup window. */
+export const setupMarkComplete = () => invoke<void>('setup_mark_complete')
+
+/** Hides the auto-opened Setup window once everything required is green. */
+export const hideSetupWindow = () => invoke<void>('hide_setup_window')
+
+/** Fix button of one check: opens the matching System Settings pane or the
+ *  app's settings section. */
+export const resolveSetup = (id: string) => invoke<void>('resolve_setup', { id })
 
 /** Право на отправку синтетических нажатий (Accessibility) — тот же
  *  источник правды, что использует paste_text перед реальной попыткой.

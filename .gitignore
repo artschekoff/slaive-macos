@@ -110,3 +110,7 @@ src-tauri/gen/schemas/
 
 # Временная заглушка иконки для `npx tauri icon` (не ассет проекта)
 /app-icon.png
+license-signing.key
+
+# Инкрементальный кэш tsc -b, не исходник
+tsconfig.tsbuildinfo

@@ -37,6 +37,32 @@ pub struct DictorRole {
     pub prompt: String,
 }
 
+/// Пара Smart Replace: произнесённая фраза → точный текст («meeting link»
+/// → ссылка, «мой имейл» → адрес). Применяется к готовой расшифровке на
+/// фронтенде (см. src/smart-replace.ts) — бэкенд только хранит пары. id —
+/// UUID от фронтенда, как у `DictorRole`: пары в списке правятся, и React
+/// нужен стабильный ключ.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SmartReplace {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// Привязка роли диктора к приложению: запись началась поверх Slack —
+/// расшифровку правит роль из пары «Slack → …», не трогая постоянный выбор
+/// в панели. `app` — подстрока имени процесса (см. macos::app_name_for_pid),
+/// сравнение на фронтенде (см. src/dictor-roles.ts, roleForApp). id — UUID
+/// от фронтенда, как у остальных редактируемых списков.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AppRole {
+    pub id: String,
+    pub app: String,
+    pub role_id: String,
+}
+
 /// Настройки ИИ-слоя. У каждого провайдера своя запись в `providers`,
 /// ключ — id провайдера (см. `ai::PROVIDERS`) — переключение между ними не
 /// затирает соседние настройки, каждая пара модель+адрес живёт отдельно.
@@ -190,13 +216,11 @@ pub struct Settings {
     /// (iPhone, USB-хабы); чинится переходом на CoreAudio device UID, если
     /// начнёт мешать.
     pub input_device: Option<String>,
-    /// Системное эхоподавление (Voice Processing I/O): звук, который Mac сам
-    /// проигрывает (видео, музыка), вычитается из сигнала микрофона — иначе
-    /// он попадает в диктовку. Побочно Apple добавляет своё шумоподавление и
-    /// автоусиление — тембр записи слегка меняется, поэтому настройка
-    /// выключаемая. Если VPIO не поднимается, запись автоматически идёт
-    /// обычным путём (см. `audio::Recorder::start`).
-    pub echo_cancellation: bool,
+    /// Глушить системный выход на время записи (см. system_audio.rs):
+    /// играющее видео или музыка не попадают в диктовку. Подход VoiceInk —
+    /// пришёл на смену эхоподавлению VPIO, которое вычитало чужой звук из
+    /// микрофона, но портило тембр и держало индикатор микрофона горящим.
+    pub mute_system_audio: bool,
     /// High-pass фильтр 80 Гц перед VAD и whisper (см. `audio::high_pass`):
     /// срезает гул помещения и вентиляторов, в которых речи нет. К сырой
     /// записи (Play, история) не применяется — это параметр распознавания,
@@ -230,6 +254,18 @@ pub struct Settings {
     /// пользователю как есть, ни одного сетевого запроса не происходит.
     /// Это и дефолт: функция строго opt-in (см. бриф — «опционально»).
     pub dictor_role: Option<String>,
+    /// Пары Smart Replace. Пустой список — функция не настроена; сида нет:
+    /// подстановки по определению личные (имена, ссылки, адреса).
+    pub smart_replaces: Vec<SmartReplace>,
+    /// Привязки «приложение → роль» для авто-роли. Пустой список — функция
+    /// не настроена; сида нет по той же причине, что у Smart Replace.
+    pub app_roles: Vec<AppRole>,
+    /// Путь к markdown-журналу, куда кнопка Journal дописывает готовые
+    /// расшифровки. Пустая строка — функция выключена, кнопки в панели нет.
+    /// Осознанное исключение из правила «пути только через app_data_dir»:
+    /// журнал по определению ЧУЖОЙ файл — заметки пользователя (Obsidian,
+    /// Documents), а не данные приложения.
+    pub journal_path: String,
 }
 
 /// Сид словаря: английские термины, которые русскоговорящий разработчик
@@ -452,6 +488,32 @@ pub fn default_dictor_roles() -> Vec<DictorRole> {
              CAPEX, OPEX, valuation, equity, liability, amortization, depreciation, \
              ROI, IRR, liquidity, portfolio, hedge, interest rate, fiscal quarter.",
         ),
+        // Роли-форматы: не «кто говорит», а «что должно получиться». Рамка
+        // промпта (см. src/dictor-roles.ts) разрешает профилю менять стиль
+        // и структуру — эти три на том и стоят.
+        seed_role(
+            "email",
+            "Email",
+            "Turn the dictation into a ready-to-send email: a brief greeting if the \
+             speaker addressed someone, short readable paragraphs, and a natural \
+             closing line. Remove filler words and repetition. Do not invent \
+             content that was not said.",
+        ),
+        seed_role(
+            "note",
+            "Note",
+            "Turn the dictation into a clear note: a short title line if the topic \
+             is obvious, bullet points for enumerations and action items, and a \
+             closing line only if the speaker said one. Remove filler words. Do \
+             not invent content that was not said.",
+        ),
+        seed_role(
+            "concise",
+            "Concise",
+            "Rewrite the dictation clearly and concisely: drop filler words, false \
+             starts and repetition, keep every actual point in the speaker's own \
+             voice and order. Do not shorten by dropping content.",
+        ),
     ]
 }
 
@@ -537,9 +599,10 @@ impl Default for Settings {
             // «System default» — следовать за системой. Это же и поведение,
             // которое было до появления выбора устройства.
             input_device: None,
-            // Включено по умолчанию: запись под играющее видео — обычный
-            // сценарий, а откат на cpal при сбое VPIO автоматический.
-            echo_cancellation: true,
+            // Включено по умолчанию: «видео попало в диктовку» — массовый
+            // сценарий, а цена — несколько секунд тишины, которые при
+            // push-to-talk и так естественны.
+            mute_system_audio: true,
             // Включён из коробки: ниже 80 Гц речи нет, резать нечего, кроме
             // гула; выключатель — на случай записи не-речи.
             high_pass_filter: true,
@@ -552,6 +615,9 @@ impl Default for Settings {
             // Активной роли по умолчанию НЕТ: правка — это сетевой запрос с
             // текстом речи на каждую диктовку, такое включают только явно.
             dictor_role: None,
+            smart_replaces: Vec::new(),
+            app_roles: Vec::new(),
+            journal_path: String::new(),
         }
     }
 }
@@ -753,10 +819,9 @@ mod tests {
         assert_eq!(s.mic_gain, 1.0);
         assert_eq!(s.vad_threshold, 0.5);
         assert_eq!(s.input_device, None);
-        // Эхоподавление включено из коробки: запись под играющее видео —
-        // обычный сценарий, а при сбое VPIO откат на cpal автоматический.
-        assert!(s.echo_cancellation);
         assert!(s.high_pass_filter);
+        // Mute выхода включён из коробки: см. довод у Default.
+        assert!(s.mute_system_audio);
         // Чуть прозрачно, но не настолько, чтобы это мешало: см. бриф.
         assert_eq!(s.window_opacity, 0.9);
         assert_eq!(s.dictionary, DEFAULT_DICTIONARY);
@@ -879,7 +944,7 @@ mod tests {
             mic_gain: 3.5,
             vad_threshold: 0.35,
             input_device: Some("Пётр's iPhone Microphone".into()),
-            echo_cancellation: false,
+            mute_system_audio: false,
             high_pass_filter: false,
             window_opacity: 0.75,
             dictionary: "React\nTypeScript".into(),
@@ -889,6 +954,17 @@ mod tests {
                 prompt: "Я программист, почини термины.".into(),
             }],
             dictor_role: Some("11111111-2222-3333-4444-555555555555".into()),
+            smart_replaces: vec![SmartReplace {
+                id: "aaaa-bbbb".into(),
+                from: "meeting link".into(),
+                to: "cal.com/art".into(),
+            }],
+            app_roles: vec![AppRole {
+                id: "cccc-dddd".into(),
+                app: "Slack".into(),
+                role_id: "11111111-2222-3333-4444-555555555555".into(),
+            }],
+            journal_path: "/tmp/journal.md".into(),
         };
         save(&dir, &s).unwrap();
         assert_eq!(load(&dir), s);
@@ -917,6 +993,30 @@ mod tests {
     /// при ОТСУТСТВИИ поля — тот же инвариант, что у словаря и языков
     /// перевода выше. Без этого удаление ненужных ролей жило бы до
     /// перезапуска.
+    /// Пары Smart Replace переживают сохранение и чтение как есть, а файл
+    /// без поля (все настройки до появления фичи) читается пустым списком,
+    /// не ошибкой.
+    #[test]
+    fn smart_replaces_roundtrip_and_default_to_empty() {
+        let mut s = Settings::default();
+        assert!(s.smart_replaces.is_empty());
+        s.smart_replaces = vec![SmartReplace {
+            id: "r1".into(),
+            from: "meeting link".into(),
+            to: "cal.com/art".into(),
+        }];
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.smart_replaces, s.smart_replaces);
+
+        let old: Settings = serde_json::from_str(r#"{"hotkey":"Alt+Space"}"#).unwrap();
+        assert!(old.smart_replaces.is_empty());
+        // Те же два инварианта у привязок «приложение → роль» и журнала:
+        // старый файл читается пустыми значениями, не ошибкой.
+        assert!(old.app_roles.is_empty());
+        assert!(old.journal_path.is_empty());
+    }
+
     #[test]
     fn cleared_dictor_roles_survive_roundtrip() {
         let mut s = Settings::default();

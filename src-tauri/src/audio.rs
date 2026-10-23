@@ -234,465 +234,30 @@ fn find_input_device(host: &cpal::Host, name: &str) -> Option<cpal::Device> {
         .find(|d| d.name().map(|n| n == name).unwrap_or(false))
 }
 
-/// Живой захват звука: обычный поток cpal или Voice Processing I/O.
-/// Существует только ради времени жизни — пока значение живо, звук пишется;
-/// drop останавливает захват. Живёт целиком на потоке записи.
-// Поля намеренно не читаются: значение держат ради Drop, который и
-// останавливает захват. Компилятор этого намерения не видит и предупреждает
-// о «неиспользуемом поле» — атрибут гасит именно этот ложный сигнал, а не
-// настоящий мёртвый код.
-#[allow(dead_code)]
+/// Живой захват звука через cpal. Существует только ради времени жизни —
+/// пока значение живо, звук пишется. Живёт целиком на потоке записи.
 enum ActiveCapture {
     Cpal(cpal::Stream),
-    #[cfg(target_os = "macos")]
-    Vpio(RunningVpio),
 }
 
-/// Тёплый VPIO-граф между записями. Сборка графа — сотни миллисекунд, и
-/// раньше она происходила на КАЖДОЕ нажатие хоткея, между нажатием и
-/// появлением окна (begin_recording намеренно идёт до show_overlay, чтобы не
-/// резать первое слово). Теперь граф собирается один раз (или при смене
-/// устройств) и дальше только запускается/останавливается.
-#[cfg(target_os = "macos")]
-static VPIO_ENGINE: Mutex<Option<vpio::Engine>> = Mutex::new(None);
-
-/// Идущая VPIO-запись: на drop останавливает захват и возвращает тёплый
-/// юнит в кэш — следующий старт записи обойдётся в start/stop, а не в
-/// пересборку графа.
-#[cfg(target_os = "macos")]
-struct RunningVpio(Option<vpio::Engine>);
-
-#[cfg(target_os = "macos")]
-impl Drop for RunningVpio {
-    fn drop(&mut self) {
-        if let Some(engine) = self.0.take() {
-            engine.end();
-            *VPIO_ENGINE.lock().unwrap() = Some(engine);
-        }
-    }
-}
-
-/// Voice Processing I/O на сырых вызовах CoreAudio.
-///
-/// Почему не через обёртку coreaudio-rs: её `AudioUnit::new` инициализирует
-/// юнит сразу (а EnableIO/устройство/формат ставятся только до
-/// инициализации), а `set_input_callback` опрашивает
-/// kAudioDevicePropertyBufferFrameSize, которого у VPIO нет, — оба шага
-/// роняли подъём эхоподавления («Initialized», «Invalid property» в логах).
-/// Сырой путь ставит свойства в правильном порядке и ничего лишнего не
-/// спрашивает.
-#[cfg(target_os = "macos")]
-mod vpio {
-    use super::{peak_amplitude, WHISPER_SAMPLE_RATE};
-    use anyhow::anyhow;
-    use coreaudio::sys as ca;
-    use std::os::raw::c_void;
-    use std::sync::{Arc, Mutex};
-
-    /// Куда летят сэмплы ТЕКУЩЕЙ записи. `None` — юнит собран, но запись не
-    /// идёт (тёплый простой между записями): колбэк просто выбрасывает кадр.
-    type Sinks = (Arc<Mutex<Vec<f32>>>, Arc<Mutex<Vec<f32>>>);
-
-    /// Контекст input-колбэка: живёт в Box за сырым указателем ровно столько,
-    /// сколько жив юнит (см. Drop у Engine).
-    struct Ctx {
-        unit: ca::AudioUnit,
-        sinks: Mutex<Option<Sinks>>,
-        scratch: Vec<f32>,
-    }
-
-    /// Собранный VPIO-граф. Сборка (создание компонента + свойства) дорогая,
-    /// поэтому юнит живёт МЕЖДУ записями. Инициализация — ленивая, один раз
-    /// на первом begin, и дальше НЕ снимается: AudioUnitInitialize у VPIO
-    /// стоит сотни миллисекунд, и плата за него на каждом старте записи —
-    /// это ровно та задержка «нажал хоткей → ON AIR», на которую жаловался
-    /// пользователь. Приглушение чужого звука инициализированным юнитом в
-    /// простое держит на нуле дакинг-конфигурация Min (см. build); если на
-    /// какой-то системе простой всё же начнёт глушить звук — возвращать
-    /// uninitialize в end, но с отложенным таймером, а не сразу.
-    /// Пока юнит остановлен, микрофон не захватывается и индикатор системы
-    /// не горит.
-    pub struct Engine {
-        unit: ca::AudioUnit,
-        ctx: *mut Ctx,
-        initialized: std::sync::atomic::AtomicBool,
-        pub input_device: ca::AudioDeviceID,
-        pub output_device: ca::AudioDeviceID,
-    }
-
-    // Хендлы AudioUnit безопасно дёргать с любого потока (API CoreAudio
-    // потокобезопасен для start/stop/dispose), а ctx жив, пока жив Engine.
-    // Send нужен, чтобы держать тёплый юнит в глобальном Mutex между
-    // потоками записи (каждая запись — свой поток, см. Recorder::start).
-    unsafe impl Send for Engine {}
-
-    impl Engine {
-        /// Начинает запись: при первом вызове инициализирует юнит (лениво,
-        /// см. комментарий у Engine), подставляет приёмники и запускает
-        /// захват. Замеры в лог — числа, не содержимое.
-        pub fn begin(
-            &self,
-            buffer: Arc<Mutex<Vec<f32>>>,
-            peaks: Arc<Mutex<Vec<f32>>>,
-        ) -> anyhow::Result<()> {
-            use std::sync::atomic::Ordering;
-            unsafe {
-                if !self.initialized.load(Ordering::Acquire) {
-                    let t = std::time::Instant::now();
-                    check(ca::AudioUnitInitialize(self.unit), "initialize vpio")?;
-                    self.initialized.store(true, Ordering::Release);
-                    log::info!("vpio: инициализация {} мс", t.elapsed().as_millis());
-                }
-                if let Ok(mut s) = (*self.ctx).sinks.lock() {
-                    *s = Some((buffer, peaks));
-                }
-                let t = std::time::Instant::now();
-                let started = check(ca::AudioOutputUnitStart(self.unit), "start vpio");
-                if started.is_ok() {
-                    log::info!("vpio: старт захвата {} мс", t.elapsed().as_millis());
-                }
-                started
-            }
-        }
-
-        /// Прогрев: инициализирует юнит заранее (без запуска захвата), чтобы
-        /// ПЕРВОЕ нажатие хоткея не платило и за инициализацию. Захват не
-        /// идёт, микрофон не горит; приглушение чужого звука держит на нуле
-        /// дакинг Min (см. build).
-        pub fn prewarm_init(&self) {
-            use std::sync::atomic::Ordering;
-            if self.initialized.load(Ordering::Acquire) {
-                return;
-            }
-            unsafe {
-                let t = std::time::Instant::now();
-                if check(ca::AudioUnitInitialize(self.unit), "initialize vpio").is_ok() {
-                    self.initialized.store(true, Ordering::Release);
-                    log::info!("vpio: прогрев-инициализация {} мс", t.elapsed().as_millis());
-                }
-            }
-        }
-
-        /// Останавливает захват. Юнит остаётся инициализированным — см.
-        /// комментарий у Engine: повторная инициализация стоила бы сотни
-        /// миллисекунд на каждом старте записи.
-        pub fn end(&self) {
-            unsafe {
-                ca::AudioOutputUnitStop(self.unit);
-                if let Ok(mut s) = (*self.ctx).sinks.lock() {
-                    *s = None;
-                }
-            }
-        }
-    }
-
-    impl Drop for Engine {
-        fn drop(&mut self) {
-            unsafe {
-                ca::AudioOutputUnitStop(self.unit);
-                ca::AudioUnitUninitialize(self.unit);
-                ca::AudioComponentInstanceDispose(self.unit);
-                // Колбэк уже не позовут — юнит остановлен и распущен.
-                drop(Box::from_raw(self.ctx));
-            }
-        }
-    }
-
-    unsafe extern "C" fn input_proc(
-        in_ref_con: *mut c_void,
-        io_action_flags: *mut ca::AudioUnitRenderActionFlags,
-        in_time_stamp: *const ca::AudioTimeStamp,
-        in_bus_number: u32,
-        in_number_frames: u32,
-        _io_data: *mut ca::AudioBufferList,
-    ) -> ca::OSStatus {
-        let ctx = &mut *(in_ref_con as *mut Ctx);
-        let frames = in_number_frames as usize;
-        if ctx.scratch.len() < frames {
-            // Аллокация в realtime-колбэке — зло, но случается максимум
-            // пару раз на старте, пока не встретился самый крупный срез.
-            ctx.scratch.resize(frames, 0.0);
-        }
-        let mut abl = ca::AudioBufferList {
-            mNumberBuffers: 1,
-            mBuffers: [ca::AudioBuffer {
-                mNumberChannels: 1,
-                mDataByteSize: (frames * std::mem::size_of::<f32>()) as u32,
-                mData: ctx.scratch.as_mut_ptr() as *mut c_void,
-            }],
-        };
-        let status = ca::AudioUnitRender(
-            ctx.unit,
-            io_action_flags,
-            in_time_stamp,
-            in_bus_number,
-            in_number_frames,
-            &mut abl,
-        );
-        if status != 0 {
-            return status;
-        }
-        // Дальше — как в cpal-колбэке: только арифметика и запись в буфер.
-        // Приёмников нет (тёплый простой между записями) — кадр выбрасываем.
-        let chunk = &ctx.scratch[..frames];
-        let peak = peak_amplitude(chunk);
-        if let Ok(s) = ctx.sinks.lock() {
-            if let Some((buffer, peaks)) = s.as_ref() {
-                if let Ok(mut b) = buffer.lock() {
-                    b.extend_from_slice(chunk);
-                }
-                if let Ok(mut p) = peaks.lock() {
-                    p.push(peak);
-                }
-            }
-        }
-        0
-    }
-
-    /// Render-колбэк выходного элемента — тишина. VPIO полнодуплексный и
-    /// отказывается инициализироваться (kAudioUnitErr_FailedInitialization,
-    /// -10875 в логах) с выключенным выходом: эхоподавлению нужен живой
-    /// render-путь. Играть нам нечего, поэтому отдаём нули.
-    unsafe extern "C" fn silence_proc(
-        _in_ref_con: *mut c_void,
-        _io_action_flags: *mut ca::AudioUnitRenderActionFlags,
-        _in_time_stamp: *const ca::AudioTimeStamp,
-        _in_bus_number: u32,
-        _in_number_frames: u32,
-        io_data: *mut ca::AudioBufferList,
-    ) -> ca::OSStatus {
-        if !io_data.is_null() {
-            let abl = &mut *io_data;
-            let bufs = std::slice::from_raw_parts_mut(
-                abl.mBuffers.as_mut_ptr(),
-                abl.mNumberBuffers as usize,
-            );
-            for b in bufs {
-                if !b.mData.is_null() {
-                    std::ptr::write_bytes(b.mData as *mut u8, 0, b.mDataByteSize as usize);
-                }
-            }
-        }
-        0
-    }
-
-    fn check(status: ca::OSStatus, what: &str) -> anyhow::Result<()> {
-        if status == 0 {
-            Ok(())
-        } else {
-            // Код OSStatus в тексте — единственная диагностика, которая
-            // доедет до лога при сбое на конкретном устройстве.
-            Err(anyhow!("{what}: OSStatus {status}"))
-        }
-    }
-
-    /// Собирает и инициализирует VPIO-граф, НЕ запуская захват: вход с
-    /// `input_device`, выход (обязательный для инициализации, см.
-    /// silence_proc) — на `output_device`. Запись включает Engine::begin;
-    /// сэмплы летят сразу в формате whisper (16 кГц моно f32 — конвертирует
-    /// сам юнит).
-    pub fn build(
-        input_device: ca::AudioDeviceID,
-        output_device: ca::AudioDeviceID,
-    ) -> anyhow::Result<Engine> {
-        unsafe {
-            let desc = ca::AudioComponentDescription {
-                componentType: ca::kAudioUnitType_Output,
-                componentSubType: ca::kAudioUnitSubType_VoiceProcessingIO,
-                componentManufacturer: ca::kAudioUnitManufacturer_Apple,
-                componentFlags: 0,
-                componentFlagsMask: 0,
-            };
-            let comp = ca::AudioComponentFindNext(std::ptr::null_mut(), &desc);
-            if comp.is_null() {
-                return Err(anyhow!("voice processing component not found"));
-            }
-            let mut unit: ca::AudioUnit = std::ptr::null_mut();
-            check(ca::AudioComponentInstanceNew(comp, &mut unit), "create vpio")?;
-
-            // Любой сбой ниже обязан прибрать уже созданный юнит и контекст.
-            let built = (|| -> anyhow::Result<*mut Ctx> {
-                let on: u32 = 1;
-                // Включены ОБА элемента: вход (1) — микрофон, выход (0) —
-                // обязательный render-путь эхоподавления (см. silence_proc).
-                // Всё ДО AudioUnitInitialize: после неё эти свойства не
-                // принимаются.
-                check(
-                    ca::AudioUnitSetProperty(
-                        unit,
-                        ca::kAudioOutputUnitProperty_EnableIO,
-                        ca::kAudioUnitScope_Input,
-                        1,
-                        &on as *const _ as *const c_void,
-                        4,
-                    ),
-                    "enable vpio input",
-                )?;
-                check(
-                    ca::AudioUnitSetProperty(
-                        unit,
-                        ca::kAudioOutputUnitProperty_EnableIO,
-                        ca::kAudioUnitScope_Output,
-                        0,
-                        &on as *const _ as *const c_void,
-                        4,
-                    ),
-                    "enable vpio output",
-                )?;
-                // Устройства — по элементам: вход на element 1, выход на 0.
-                check(
-                    ca::AudioUnitSetProperty(
-                        unit,
-                        ca::kAudioOutputUnitProperty_CurrentDevice,
-                        ca::kAudioUnitScope_Global,
-                        1,
-                        &input_device as *const _ as *const c_void,
-                        std::mem::size_of::<ca::AudioDeviceID>() as u32,
-                    ),
-                    "bind vpio to input device",
-                )?;
-                check(
-                    ca::AudioUnitSetProperty(
-                        unit,
-                        ca::kAudioOutputUnitProperty_CurrentDevice,
-                        ca::kAudioUnitScope_Global,
-                        0,
-                        &output_device as *const _ as *const c_void,
-                        std::mem::size_of::<ca::AudioDeviceID>() as u32,
-                    ),
-                    "bind vpio to output device",
-                )?;
-                let asbd = ca::AudioStreamBasicDescription {
-                    mSampleRate: WHISPER_SAMPLE_RATE as f64,
-                    mFormatID: ca::kAudioFormatLinearPCM,
-                    mFormatFlags: ca::kAudioFormatFlagIsFloat | ca::kAudioFormatFlagIsPacked,
-                    mBytesPerPacket: 4,
-                    mFramesPerPacket: 1,
-                    mBytesPerFrame: 4,
-                    mChannelsPerFrame: 1,
-                    mBitsPerChannel: 32,
-                    mReserved: 0,
-                };
-                check(
-                    ca::AudioUnitSetProperty(
-                        unit,
-                        ca::kAudioUnitProperty_StreamFormat,
-                        ca::kAudioUnitScope_Output,
-                        1,
-                        &asbd as *const _ as *const c_void,
-                        std::mem::size_of::<ca::AudioStreamBasicDescription>() as u32,
-                    ),
-                    "set vpio capture format",
-                )?;
-                // Тот же клиентский формат на render-стороне: silence_proc
-                // отдаёт нули, формат важен только для согласованности.
-                check(
-                    ca::AudioUnitSetProperty(
-                        unit,
-                        ca::kAudioUnitProperty_StreamFormat,
-                        ca::kAudioUnitScope_Input,
-                        0,
-                        &asbd as *const _ as *const c_void,
-                        std::mem::size_of::<ca::AudioStreamBasicDescription>() as u32,
-                    ),
-                    "set vpio render format",
-                )?;
-                let silence_cb = ca::AURenderCallbackStruct {
-                    inputProc: Some(silence_proc),
-                    inputProcRefCon: std::ptr::null_mut(),
-                };
-                check(
-                    ca::AudioUnitSetProperty(
-                        unit,
-                        ca::kAudioUnitProperty_SetRenderCallback,
-                        ca::kAudioUnitScope_Input,
-                        0,
-                        &silence_cb as *const _ as *const c_void,
-                        std::mem::size_of::<ca::AURenderCallbackStruct>() as u32,
-                    ),
-                    "set vpio render callback",
-                )?;
-                let ctx = Box::into_raw(Box::new(Ctx {
-                    unit,
-                    sinks: Mutex::new(None),
-                    scratch: vec![0.0; 8192],
-                }));
-                let cb = ca::AURenderCallbackStruct {
-                    inputProc: Some(input_proc),
-                    inputProcRefCon: ctx as *mut c_void,
-                };
-                let steps = check(
-                    ca::AudioUnitSetProperty(
-                        unit,
-                        ca::kAudioOutputUnitProperty_SetInputCallback,
-                        ca::kAudioUnitScope_Global,
-                        0,
-                        &cb as *const _ as *const c_void,
-                        std::mem::size_of::<ca::AURenderCallbackStruct>() as u32,
-                    ),
-                    "set vpio input callback",
-                );
-                if let Err(e) = steps {
-                    drop(Box::from_raw(ctx));
-                    return Err(e);
-                }
-
-                // Приглушение ЧУЖОГО звука на минимум: по умолчанию macOS в
-                // голосовом режиме притапливает остальной вывод (как
-                // FaceTime), а пользователь во время диктовки продолжает
-                // слушать своё видео — глушить его не наше дело,
-                // эхоподавлению уровень дакинга не нужен. Свойство появилось
-                // в macOS 14 — на старых системах просто не применится
-                // (best effort, в лог и дальше). Констант нет в coreaudio-sys,
-                // поэтому объявлены локально по AudioUnitProperties.h.
-                const OTHER_AUDIO_DUCKING_CONFIGURATION: u32 = 2108;
-                const DUCKING_LEVEL_MIN: u32 = 10;
-                #[repr(C)]
-                struct DuckingConfig {
-                    enable_advanced_ducking: u8, // Boolean
-                    ducking_level: u32,
-                }
-                let ducking = DuckingConfig {
-                    enable_advanced_ducking: 0,
-                    ducking_level: DUCKING_LEVEL_MIN,
-                };
-                if let Err(e) = check(
-                    ca::AudioUnitSetProperty(
-                        unit,
-                        OTHER_AUDIO_DUCKING_CONFIGURATION,
-                        ca::kAudioUnitScope_Global,
-                        0,
-                        &ducking as *const _ as *const c_void,
-                        std::mem::size_of::<DuckingConfig>() as u32,
-                    ),
-                    "set vpio ducking",
-                ) {
-                    log::warn!("не удалось убрать приглушение чужого звука: {e}");
-                }
-
-                // AudioUnitInitialize здесь НЕ зовётся — см. Engine::begin.
-                Ok(ctx)
-            })();
-
-            match built {
-                Ok(ctx) => Ok(Engine {
-                    unit,
-                    ctx,
-                    initialized: std::sync::atomic::AtomicBool::new(false),
-                    input_device,
-                    output_device,
-                }),
-                Err(e) => {
-                    ca::AudioUnitUninitialize(unit);
-                    ca::AudioComponentInstanceDispose(unit);
-                    Err(e)
-                }
+impl ActiveCapture {
+    /// Явно останавливает поток перед сбросом. На macOS cpal 0.15 в Drop
+    /// НЕ закрывает входное устройство надёжно: после записи индикатор
+    /// микрофона оставался гореть, а колбэк продолжал крутиться (видно по
+    /// `sample` живого процесса). `pause()` зовёт AudioOutputUnitStop явно
+    /// — устройство освобождается сразу, а не «когда-нибудь». Зовётся до
+    /// drop; идемпотентна, повторный drop безвреден.
+    fn stop_capture(&self) {
+        use cpal::traits::StreamTrait;
+        match self {
+            ActiveCapture::Cpal(stream) => {
+                let _ = stream.pause();
             }
         }
     }
 }
 
-/// Захват через cpal — путь по умолчанию без эхоподавления. Возвращает
+/// Захват через cpal — единственный путь записи. Возвращает
 /// (живой поток, частота, каналы, имя устройства, которого не нашлось).
 fn build_cpal_capture(
     preferred: Option<&str>,
@@ -756,112 +321,7 @@ fn build_cpal_capture(
     Ok((ActiveCapture::Cpal(stream), sample_rate, channels, fell_back_from))
 }
 
-/// Захват через Voice Processing I/O — системное эхоподавление macOS (то же,
-/// что у FaceTime): из сигнала микрофона вычитается звук, который Mac сам
-/// сейчас проигрывает, — видео в браузере перестаёт попадать в диктовку.
-/// Побочно Apple применяет и своё шумоподавление/AGC — это свойство режима,
-/// а не наша настройка. Сам юнит поднимает модуль `vpio` выше.
-///
-/// Любая ошибка здесь — повод откатиться на cpal-путь (см. Recorder::start),
-/// а не сорвать запись: эхоподавление — улучшение, микрофон — обязанность.
-#[cfg(target_os = "macos")]
-fn build_vpio_capture(
-    preferred: Option<&str>,
-    buffer: Arc<Mutex<Vec<f32>>>,
-    peaks: Arc<Mutex<Vec<f32>>>,
-) -> anyhow::Result<(ActiveCapture, u32, u16, Option<String>)> {
-    use coreaudio::audio_unit::macos_helpers::{get_default_device_id, get_device_id_from_name};
 
-    // Тот же выбор устройства, что у cpal-пути: имена CoreAudio и cpal
-    // совпадают (cpal на macOS читает то же свойство устройства). И так же,
-    // как там, список устройств опрашивается только ради закреплённого
-    // имени — «System default» этих миллисекунд не платит.
-    let choice = match preferred {
-        None => DeviceChoice::SystemDefault,
-        Some(_) => choose_device(preferred, &list_input_devices()),
-    };
-    let named_id = match &choice {
-        DeviceChoice::Named(name) => get_device_id_from_name(name),
-        _ => None,
-    };
-    let (device_id, fell_back_from) = match named_id {
-        Some(id) => (id, None),
-        None => {
-            let id = get_default_device_id(true).ok_or_else(|| anyhow!("no input device found"))?;
-            let missing = match choice {
-                DeviceChoice::SystemDefault => None,
-                DeviceChoice::Named(name) | DeviceChoice::MissingFallback(name) => Some(name),
-            };
-            (id, missing)
-        }
-    };
-
-    // Выход нужен юниту как render-путь эхоподавления (см. vpio::build) —
-    // всегда системный выходной по умолчанию: звук, который мы вычитаем,
-    // играет именно там.
-    let output_id =
-        get_default_device_id(false).ok_or_else(|| anyhow!("no output device for vpio"))?;
-
-    // Тёплый юнит из кэша, если устройства не менялись; иначе (первая
-    // запись без прогрева, сменили микрофон/выход) — пересборка.
-    let cached = VPIO_ENGINE.lock().unwrap().take();
-    let engine = match cached {
-        Some(e) if e.input_device == device_id && e.output_device == output_id => e,
-        _ => {
-            let t = std::time::Instant::now();
-            let e = vpio::build(device_id, output_id)?;
-            log::info!("vpio: холодная сборка графа {} мс", t.elapsed().as_millis());
-            e
-        }
-    };
-    if let Err(e) = engine.begin(buffer, peaks) {
-        // Юнит, который не стартует, в кэш не возвращаем — пусть следующая
-        // попытка соберёт свежий.
-        return Err(e);
-    }
-    // Одна строка на запись: по логу должно быть видно, каким путём пошёл
-    // захват, — молчаливый фолбэк уже один раз спрятал поломку.
-    log::info!("запись через Voice Processing I/O, эхоподавление активно");
-
-    Ok((
-        ActiveCapture::Vpio(RunningVpio(Some(engine))),
-        WHISPER_SAMPLE_RATE,
-        1,
-        fell_back_from,
-    ))
-}
-
-/// Прогрев эхоподавления при старте приложения: собирает VPIO-граф в кэш
-/// заранее, чтобы ПЕРВОЕ нажатие хоткея не платило за сборку (сотни
-/// миллисекунд между нажатием и появлением окна). Ошибки только в лог —
-/// запись при пустом кэше соберёт граф сама.
-#[cfg(target_os = "macos")]
-pub fn prewarm_echo_cancellation(preferred: Option<String>) {
-    use coreaudio::audio_unit::macos_helpers::{get_default_device_id, get_device_id_from_name};
-    std::thread::spawn(move || {
-        let input_id = match preferred.as_deref() {
-            // Именованного может не оказаться — греем на умолчании, как
-            // сделает и сама запись (fell_back_from сообщит о подмене она же).
-            // Список устройств не опрашиваем: id ищется прямо по имени.
-            Some(name) => get_device_id_from_name(name).or_else(|| get_default_device_id(true)),
-            None => get_default_device_id(true),
-        };
-        let (Some(input_id), Some(output_id)) = (input_id, get_default_device_id(false)) else {
-            log::warn!("прогрев эхоподавления: не нашлось устройств, пропускаем");
-            return;
-        };
-        match vpio::build(input_id, output_id) {
-            Ok(engine) => {
-                // Инициализацию тоже платим здесь, в фоне старта приложения,
-                // а не на первом хоткее.
-                engine.prewarm_init();
-                *VPIO_ENGINE.lock().unwrap() = Some(engine);
-                log::info!("эхоподавление прогрето заранее");
-            }
-            Err(e) => log::warn!("прогрев эхоподавления не удался: {e}"),
-        }
-    });
-}
 
 /// Пишет с микрофона на выделенном потоке: ни `cpal::Stream`, ни `AudioUnit`
 /// не `Send`, поэтому они не могут жить в состоянии Tauri напрямую.
@@ -888,11 +348,11 @@ impl Recorder {
     /// системным умолчанием. Устройство выбирается один раз, на старте
     /// записи: менять его посреди записи нельзя, выбор применяется к следующей.
     ///
-    /// `echo_cancel` — включить системное эхоподавление (Voice Processing
-    /// I/O): звук, который Mac сам проигрывает, вычитается из микрофона.
-    /// Если VPIO не поднялся, запись молча идёт обычным путём cpal — с
-    /// предупреждением в лог, но без срыва записи.
-    pub fn start(preferred: Option<String>, echo_cancel: bool) -> anyhow::Result<Self> {
+    /// Захват — всегда cpal. Эхоподавление через VPIO здесь жило и было
+    /// удалено: пользы не показало, а инициализированный юнит держал
+    /// входное устройство открытым, и macOS жгла индикатор микрофона всё
+    /// время работы приложения, даже без записи.
+    pub fn start(preferred: Option<String>) -> anyhow::Result<Self> {
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let (done_tx, done_rx) = mpsc::channel::<anyhow::Result<Vec<f32>>>();
         // Первым сообщением поток отдаёт не только «удалось/не удалось», но и
@@ -908,21 +368,7 @@ impl Recorder {
             // «хоткей → ON AIR»; в лог идёт только число.
             let capture_t = std::time::Instant::now();
 
-            #[cfg(target_os = "macos")]
-            let built = if echo_cancel {
-                build_vpio_capture(preferred.as_deref(), buffer.clone(), peaks_thread.clone())
-                    .or_else(|e| {
-                        log::warn!("эхоподавление не поднялось, пишем без него: {e}");
-                        build_cpal_capture(preferred.as_deref(), buffer.clone(), peaks_thread)
-                    })
-            } else {
-                build_cpal_capture(preferred.as_deref(), buffer.clone(), peaks_thread)
-            };
-            #[cfg(not(target_os = "macos"))]
-            let built = {
-                let _ = echo_cancel; // VPIO — только macOS
-                build_cpal_capture(preferred.as_deref(), buffer.clone(), peaks_thread)
-            };
+            let built = build_cpal_capture(preferred.as_deref(), buffer.clone(), peaks_thread);
 
             let (capture, sample_rate, channels) = match built {
                 Ok((capture, sample_rate, channels, fell_back_from)) => {
@@ -938,6 +384,10 @@ impl Recorder {
 
             // Блокируемся, пока не попросят остановиться (или пока отправитель не умрёт).
             let _ = stop_rx.recv();
+            // Явный stop ДО drop: cpal 0.15 на macOS не освобождает вход в
+            // Drop сам (см. ActiveCapture::stop_capture) — без этого
+            // микрофон оставался занят процессом после каждой записи.
+            capture.stop_capture();
             drop(capture);
 
             // M8: отравленный мьютекс — это потерянное аудио, а не тишина.

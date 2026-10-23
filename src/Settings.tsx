@@ -23,6 +23,10 @@ import {
   testAiConnection,
   setWindowOpacity,
   countPromptTokens,
+  licenseStatus,
+  activateLicense,
+  openBuyPage,
+  type LicenseStatus,
   type SettingsResponse as S,
   type ModelCatalog,
   type ModelEntry,
@@ -31,7 +35,8 @@ import {
   type PromptBudget,
 } from './api'
 import { effectiveBaseUrl, isSelectable, emptyProviderConfig, type AiProviderInfo } from './ai'
-import type { DictorRole } from './dictor-roles'
+import type { AppRole, DictorRole } from './dictor-roles'
+import type { SmartReplace } from './smart-replace'
 import { SECTIONS, FIRST_SECTION, type SectionId } from './settings-sections'
 import {
   DEFAULT_TRANSLATE_LANGUAGES,
@@ -81,6 +86,11 @@ const FOLLOW_MODIFIER_ERROR =
 export function Settings() {
   const [s, setS] = useState<S | null>(null)
   const [saved, setSaved] = useState(false)
+  // Лицензия: null — ещё спрашиваем бэкенд. Черновик ключа — локальный,
+  // в settings.json он не попадает (ключ живёт в license.json).
+  const [license, setLicense] = useState<LicenseStatus | null>(null)
+  const [licenseKeyDraft, setLicenseKeyDraft] = useState('')
+  const [licenseError, setLicenseError] = useState('')
   const [saveError, setSaveError] = useState('')
 
   // Открытый раздел. Первый при открытии окна, а не запомненный (см.
@@ -122,11 +132,37 @@ export function Settings() {
       setS(fresh)
       setPeak(fresh.lastPeak)
     })
+    // Статус лицензии — отдельной командой: он живёт в license.json, не в
+    // settings.json, и в Settings-объект не подмешивается.
+    licenseStatus().then(setLicense, () => {})
     const un = listen<number>('rec:peak', (e) => setPeak(e.payload))
+    // Окно Setup (и любой будущий вызов open_settings_section в Rust)
+    // открывает настройки сразу на нужном разделе. Неизвестный id молча
+    // игнорируем: устаревший отправитель не должен ронять окно.
+    const unSection = listen<SectionId>('settings:open-section', (e) => {
+      if (SECTIONS.some((sec) => sec.id === e.payload)) setSection(e.payload)
+      // Лицензию к этому моменту могли активировать из этого же окна — а
+      // вот триал тикает и снаружи; перечитываем статус заодно.
+      licenseStatus().then(setLicense, () => {})
+    })
     return () => {
       un.then((f) => f())
+      unSection.then((f) => f())
     }
   }, [])
+
+  // Активация ключа: успех обновляет статус (бэкенд возвращает свежий),
+  // отказ показывает причину под полем, не трогая остальное окно.
+  const onActivateLicense = async () => {
+    setLicenseError('')
+    try {
+      const fresh = await activateLicense(licenseKeyDraft.trim())
+      setLicense(fresh)
+      setLicenseKeyDraft('')
+    } catch (e) {
+      setLicenseError(String(e))
+    }
+  }
 
   // ===== Раздел Models =====
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
@@ -307,6 +343,27 @@ export function Settings() {
       dictorRoles: s.dictorRoles.filter((r) => r.id !== id),
       ...(s.dictorRole === id ? { dictorRole: null } : {}),
     })
+
+  // Привязки «приложение → роль» — те же три операции, что у ролей выше.
+  const patchAppRole = (id: string, p: Partial<AppRole>) =>
+    patch({ appRoles: s.appRoles.map((r) => (r.id === id ? { ...r, ...p } : r)) })
+
+  const addAppRole = () =>
+    patch({ appRoles: [...s.appRoles, { id: crypto.randomUUID(), app: '', roleId: '' }] })
+
+  const removeAppRole = (id: string) =>
+    patch({ appRoles: s.appRoles.filter((r) => r.id !== id) })
+
+  // Пары Smart Replace — те же три операции, что у ролей выше: список
+  // правится по стабильному id, активного элемента у пар нет.
+  const patchReplace = (id: string, p: Partial<SmartReplace>) =>
+    patch({ smartReplaces: s.smartReplaces.map((r) => (r.id === id ? { ...r, ...p } : r)) })
+
+  const addReplace = () =>
+    patch({ smartReplaces: [...s.smartReplaces, { id: crypto.randomUUID(), from: '', to: '' }] })
+
+  const removeReplace = (id: string) =>
+    patch({ smartReplaces: s.smartReplaces.filter((r) => r.id !== id) })
 
   const onSave = async () => {
     setSaveError('')
@@ -498,16 +555,15 @@ export function Settings() {
       <label className="check-row">
         <input
           type="checkbox"
-          checked={s.echoCancellation}
-          onChange={(e) => patch({ echoCancellation: e.target.checked })}
+          checked={s.muteSystemAudio}
+          onChange={(e) => patch({ muteSystemAudio: e.target.checked })}
         />
-        Remove system audio from recordings (echo cancellation)
+        Mute system audio while recording
       </label>
       <p className="hint">
-        Uses the same macOS voice processing as FaceTime: whatever the Mac is playing — a video,
-        music — is subtracted from the microphone signal, so it doesn't end up in your dictation.
-        Also applies Apple's noise suppression, which slightly changes the recording's tone; turn
-        this off if you prefer the raw microphone. Applies to the next recording.
+        A playing video or music would end up in your dictation otherwise. The output is muted
+        for exactly the length of the recording and restored right after — only if Slaive muted
+        it itself: a volume you muted by hand stays muted. Applies to the next recording.
       </p>
 
       <label className="check-row">
@@ -711,6 +767,40 @@ export function Settings() {
                   'so — the terms written first would stop being suggested. Shorten the list.'
                 : `Prompt budget: ${budget.tokens} of ${budget.max} tokens used.`}
       </p>
+
+      {/* Smart Replace — здесь, а не в AI: замены локальные, без сети (см.
+          settings-sections.ts). Словарь выше учит whisper СЛЫШАТЬ термин,
+          пара ниже подставляет вместо услышанного точный текст. */}
+      <h2>Smart Replace</h2>
+      <p className="hint">
+        Say a phrase, get exact text: "meeting link" becomes your actual link, "my email" becomes
+        the address. The whole phrase is matched, case doesn't matter, and the swap happens on
+        your Mac before the text reaches you — nothing is sent anywhere.
+      </p>
+      {s.smartReplaces.map((r) => (
+        <div key={r.id} className="row-with-button replace-row">
+          <input
+            value={r.from}
+            placeholder="When I say…"
+            aria-label="Spoken phrase"
+            onChange={(e) => patchReplace(r.id, { from: e.target.value })}
+          />
+          <input
+            value={r.to}
+            placeholder="…write this"
+            aria-label="Replacement text"
+            onChange={(e) => patchReplace(r.id, { to: e.target.value })}
+          />
+          <button type="button" onClick={() => removeReplace(r.id)}>
+            Delete
+          </button>
+        </div>
+      ))}
+      <div className="download">
+        <button type="button" onClick={addReplace}>
+          Add replacement
+        </button>
+      </div>
     </>
   )
 
@@ -1050,6 +1140,69 @@ export function Settings() {
           Add role
         </button>
       </div>
+
+      {/* Авто-роль по приложению: пары правятся здесь, срабатывают в
+          панели (см. roleForApp в dictor-roles.ts). Селектор ролей — из
+          списка выше: привязывать можно только то, что существует. */}
+      <h2>Auto role by app</h2>
+      <p className="hint">
+        Start dictating over Slack and get one role, over your editor and get another — without
+        touching the selector. The match is by app name, case doesn't matter, a part of the name
+        is enough ("code" matches "Code"). The first matching row wins. The binding applies per
+        recording; the role picked in the panel stays as is.
+      </p>
+      {s.appRoles.map((r) => (
+        <div key={r.id} className="row-with-button replace-row">
+          <input
+            value={r.app}
+            placeholder="App name, e.g. Slack"
+            aria-label="App name"
+            onChange={(e) => patchAppRole(r.id, { app: e.target.value })}
+          />
+          <select
+            value={r.roleId}
+            aria-label="Role for this app"
+            onChange={(e) => patchAppRole(r.id, { roleId: e.target.value })}
+          >
+            <option value="" disabled>
+              Pick a role…
+            </option>
+            {s.dictorRoles.map((role) => (
+              <option key={role.id} value={role.id}>
+                {role.name || '(unnamed)'}
+              </option>
+            ))}
+          </select>
+          <button type="button" onClick={() => removeAppRole(r.id)}>
+            Delete
+          </button>
+        </div>
+      ))}
+      <div className="download">
+        <button type="button" onClick={addAppRole}>
+          Add binding
+        </button>
+      </div>
+
+      {/* Журнал — в AI по доводу из settings-sections.ts: «что происходит с
+          текстом после распознавания», хотя сети ему не нужно. Текстовое
+          поле, не файловый диалог — тянуть плагин диалогов ради одного
+          пути незачем (см. дизайн фичи). */}
+      <h2>Journal</h2>
+      <label>
+        Journal file
+        <input
+          value={s.journalPath}
+          placeholder="/Users/you/Documents/journal.md"
+          onChange={(e) => patch({ journalPath: e.target.value })}
+        />
+      </label>
+      <p className="hint">
+        A Journal button appears in the panel when a path is set. It appends the transcript to
+        this markdown file with a timestamp — new entries go to the end, nothing else in the file
+        is touched. Point it at your Obsidian daily-notes file or any .md you keep. Leave empty
+        to turn the feature off.
+      </p>
     </>
   )
 
@@ -1093,6 +1246,56 @@ export function Settings() {
     </>
   )
 
+  // Лицензия: статус читается с бэкенда (license.rs), не из settings.json.
+  const licenseSection = (
+    <>
+      <p className="hint">
+        {license === null
+          ? 'Checking the license…'
+          : license.state === 'licensed'
+            ? 'Licensed — lifetime, all updates included. Thank you!'
+            : license.state === 'trial'
+              ? `Trial: ${license.daysLeft} ${license.daysLeft === 1 ? 'day' : 'days'} left. ` +
+                'Everything works during the trial.'
+              : 'Trial expired. Recording is paused until a license key is entered — ' +
+                'your settings and already transcribed text are untouched.'}
+      </p>
+      {license?.state !== 'licensed' && (
+        <>
+          <div className="download">
+            <button type="button" className="primary" onClick={() => void openBuyPage()}>
+              Buy a license…
+            </button>
+          </div>
+          <p className="hint">
+            One-time purchase, no subscription: the key is yours forever, updates included. The
+            checkout opens in your browser; the key arrives by email. Slaive is open source — you
+            can always build it yourself for free. Buying the official signed build is what keeps
+            the project alive.
+          </p>
+          <label>
+            License key
+            <div className="row-with-button">
+              <input
+                value={licenseKeyDraft}
+                placeholder="SLAIVE1-…"
+                onChange={(e) => setLicenseKeyDraft(e.target.value)}
+              />
+              <button
+                type="button"
+                disabled={!licenseKeyDraft.trim()}
+                onClick={onActivateLicense}
+              >
+                Activate
+              </button>
+            </div>
+          </label>
+          {licenseError && <p className="hint err">{licenseError}</p>}
+        </>
+      )}
+    </>
+  )
+
   const BODY: Record<SectionId, JSX.Element> = {
     audio: audioSection,
     models: modelsSection,
@@ -1100,6 +1303,7 @@ export function Settings() {
     shortcuts: shortcutsSection,
     ai: aiSection,
     appearance: appearanceSection,
+    license: licenseSection,
   }
 
   const current = SECTIONS.find((sec) => sec.id === section) ?? SECTIONS[0]

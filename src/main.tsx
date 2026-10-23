@@ -4,6 +4,7 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { Settings } from './Settings'
 import { Overlay } from './Overlay'
 import { MainWindow } from './MainWindow'
+import { SetupWindow } from './SetupWindow'
 import './styles.css'
 
 const label = getCurrentWebviewWindow().label
@@ -11,6 +12,7 @@ const label = getCurrentWebviewWindow().label
 function routeByLabel() {
   if (label === 'settings') return <Settings />
   if (label === 'main') return <MainWindow />
+  if (label === 'setup') return <SetupWindow />
   return <Overlay />
 }
 
