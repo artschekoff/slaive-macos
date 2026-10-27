@@ -207,8 +207,25 @@ fn modifiers_block_copy(flags: CGEventFlags) -> bool {
 /// модификаторы, пока пользователь держит их зажатыми. Усложнять, если
 /// найдётся приложение, ради которого ожидание окажется слишком долгим.
 fn wait_for_quiet_modifiers() -> bool {
+    wait_for_quiet_modifiers_with(
+        || modifiers_block_copy(hardware_modifier_flags()),
+        std::thread::sleep,
+    )
+}
+
+/// Сам цикл ожидания, отделённый от чтения настоящей клавиатуры и настоящего
+/// сна. Разделение нужно ради теста: прежний тест мерил `Instant::elapsed` и
+/// допускал 100 мс запаса — под нагрузкой планировщик съедал запас, и тест
+/// падал, хотя логика была верна. Граница здесь живёт в СОБСТВЕННОМ учёте
+/// `waited`, и проверять её надо по нему, а не по настенным часам: часы
+/// измеряют загруженность машины, а не корректность цикла.
+fn wait_for_quiet_modifiers_with<B, S>(mut blocked: B, mut sleep: S) -> bool
+where
+    B: FnMut() -> bool,
+    S: FnMut(std::time::Duration),
+{
     let mut waited = std::time::Duration::ZERO;
-    while modifiers_block_copy(hardware_modifier_flags()) {
+    while blocked() {
         if waited >= MODIFIER_RELEASE_DEADLINE {
             return false;
         }
@@ -216,7 +233,7 @@ fn wait_for_quiet_modifiers() -> bool {
             MODIFIER_POLL_INTERVAL,
             MODIFIER_RELEASE_DEADLINE - waited,
         );
-        std::thread::sleep(step);
+        sleep(step);
         waited += step;
     }
     true
@@ -813,14 +830,48 @@ mod tests {
 
     /// Ожидание не может длиться дольше объявленного предела: захват и без
     /// того тратит до полусекунды на опрос счётчика буфера обмена.
+    ///
+    /// Проверяется по собственному учёту цикла, а не по `Instant::elapsed`:
+    /// настенные часы меряют загруженность машины, и прежний вариант этого
+    /// теста падал под нагрузкой при полностью исправной логике.
     #[test]
     fn waiting_for_modifiers_is_bounded() {
-        let started = std::time::Instant::now();
-        wait_for_quiet_modifiers();
-        assert!(
-            started.elapsed() <= MODIFIER_RELEASE_DEADLINE + std::time::Duration::from_millis(100),
-            "ожидание модификаторов длилось дольше предельного времени"
+        let mut slept = std::time::Duration::ZERO;
+        // Модификаторы зажаты навсегда — худший случай, ради которого предел
+        // и существует.
+        let quiet = wait_for_quiet_modifiers_with(|| true, |d| slept += d);
+        assert!(!quiet, "при вечно зажатых модификаторах ожидание обязано сдаться");
+        assert_eq!(
+            slept, MODIFIER_RELEASE_DEADLINE,
+            "суммарное ожидание разошлось с объявленным пределом"
         );
+    }
+
+    /// Обратный случай: ждать нечего, и спать нельзя ни мгновения — иначе
+    /// каждый захват платил бы лишним шагом опроса на ровном месте.
+    #[test]
+    fn waiting_returns_at_once_when_modifiers_are_quiet() {
+        let mut slept = std::time::Duration::ZERO;
+        let quiet = wait_for_quiet_modifiers_with(|| false, |d| slept += d);
+        assert!(quiet);
+        assert_eq!(slept, std::time::Duration::ZERO, "спали, хотя ждать было нечего");
+    }
+
+    /// Отпускание посреди ожидания прекращает цикл сразу, а не досыпает до
+    /// предела: иначе захват всегда стоил бы полные полсекунды.
+    #[test]
+    fn waiting_stops_as_soon_as_modifiers_are_released() {
+        let mut polls = 0;
+        let mut slept = std::time::Duration::ZERO;
+        let quiet = wait_for_quiet_modifiers_with(
+            || {
+                polls += 1;
+                polls <= 2
+            },
+            |d| slept += d,
+        );
+        assert!(quiet, "модификаторы отпущены — ожидание обязано считаться успешным");
+        assert_eq!(slept, MODIFIER_POLL_INTERVAL * 2, "лишние шаги после отпускания");
     }
 
     // Счётчик не обязан иметь какое-то конкретное значение — он растёт при
