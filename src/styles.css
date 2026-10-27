@@ -1214,6 +1214,40 @@ button.primary {
   color: #fff;
 }
 
+/* Селектор автоперевода главного окна. Стоит слева, сразу за именем
+   источника (без margin-left:auto), правый блок формат/Copy/Paste остаётся
+   справа. Пара «ярлык + селектор» держится вплотную. */
+.mw-lang {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+.mw-lang-chip {
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background: rgba(255, 255, 255, 0.1);
+  color: #9a9aa0;
+  white-space: nowrap;
+}
+.main-window select.mw-lang-select {
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  border-radius: 5px;
+  padding: 3px 6px;
+  color: #f2f2f7;
+  font-size: 11px;
+  font-family: inherit;
+}
+.main-window select.mw-lang-select:disabled {
+  opacity: 0.45;
+}
+
 /* Полоса возврата над сеткой действий. Оформлена намеренно НЕ как кнопка
    действия: у тех заливка (.chassis button), здесь её нет — приглушённый
    текст со стрелкой, который читается как «шаг назад», а не как «сделать

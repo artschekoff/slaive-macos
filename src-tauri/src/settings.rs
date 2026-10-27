@@ -254,6 +254,17 @@ pub struct Settings {
     /// пользователю как есть, ни одного сетевого запроса не происходит.
     /// Это и дефолт: функция строго opt-in (см. бриф — «опционально»).
     pub dictor_role: Option<String>,
+    /// Язык автоперевода. Пустая строка — перевод выключен (дефолт): текст
+    /// уходит как есть. Выбран язык — тем же ИИ-проходом, что и роль (см.
+    /// buildRoleSystemPrompt в dictor-roles.ts), текст переводится на него,
+    /// работает и без выбранной роли. Название языка, а не код — как в
+    /// translate_languages, из которого и берётся список в селекторе панели.
+    pub target_language: String,
+    /// Язык автоперевода ГЛАВНОГО окна — независим от `target_language`
+    /// панели: голосом можно переводить в один язык, захваченный текст — в
+    /// другой (см. clarification пользователя). Пустая строка — выключено.
+    /// Применяется к тексту, пришедшему по follow:text (захват/Follow).
+    pub main_target_language: String,
     /// Пары Smart Replace. Пустой список — функция не настроена; сида нет:
     /// подстановки по определению личные (имена, ссылки, адреса).
     pub smart_replaces: Vec<SmartReplace>,
@@ -615,6 +626,9 @@ impl Default for Settings {
             // Активной роли по умолчанию НЕТ: правка — это сетевой запрос с
             // текстом речи на каждую диктовку, такое включают только явно.
             dictor_role: None,
+            // Перевод по умолчанию выключен — функция строго opt-in, как роль.
+            target_language: String::new(),
+            main_target_language: String::new(),
             smart_replaces: Vec::new(),
             app_roles: Vec::new(),
             journal_path: String::new(),
@@ -954,6 +968,8 @@ mod tests {
                 prompt: "Я программист, почини термины.".into(),
             }],
             dictor_role: Some("11111111-2222-3333-4444-555555555555".into()),
+            target_language: "English".into(),
+            main_target_language: "Spanish".into(),
             smart_replaces: vec![SmartReplace {
                 id: "aaaa-bbbb".into(),
                 from: "meeting link".into(),
@@ -986,6 +1002,8 @@ mod tests {
         let s = load(&dir);
         assert_eq!(s.dictor_roles, default_dictor_roles());
         assert_eq!(s.dictor_role, None);
+        assert_eq!(s.target_language, "", "перевод по умолчанию выключен");
+        assert_eq!(s.main_target_language, "", "перевод главного окна тоже выключен");
         assert_eq!(s.language, "ru");
     }
 

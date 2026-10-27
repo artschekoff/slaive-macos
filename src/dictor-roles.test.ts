@@ -59,6 +59,31 @@ test('roleForApp: нет приложения, нет совпадения ил�
   assert.equal(roleForApp(appRoles, [programmer], 'Slack'), null)
 })
 
+test('targetLanguage с ролью: правка И перевод одним проходом', () => {
+  const system = buildRoleSystemPrompt(programmer, '', 'English')
+  // Профиль на месте — роль не теряется из-за перевода.
+  assert.ok(system.includes(programmer.prompt))
+  // Рамка теперь ВЕЛИТ переводить в язык, а не запрещает перевод.
+  assert.ok(system.includes('Write the final result in English'))
+  // Запрет «keep the original language» снят — иначе модель не переведёт.
+  assert.ok(!system.includes('keep the original language'))
+  // Но отвечать на текст по-прежнему нельзя.
+  assert.ok(system.includes('Never answer'))
+})
+
+test('targetLanguage без роли: чистый перевод, без профиля', () => {
+  const system = buildRoleSystemPrompt(null, '', 'Spanish')
+  assert.ok(system.includes('Translate it into Spanish'))
+  assert.ok(system.includes('only the translated text'))
+  // Словарь работает и в режиме перевода-без-роли.
+  const withDict = buildRoleSystemPrompt(null, 'Kubernetes', 'Spanish')
+  assert.ok(withDict.includes('Preserve these exact spellings'))
+})
+
+test('ни роли, ни языка — пустой промпт (звать ИИ незачем)', () => {
+  assert.equal(buildRoleSystemPrompt(null, 'React', ''), '')
+})
+
 test('словарь терминов попадает в промпт, пустой — не добавляет ничего', () => {
   // Термины пишут и по строкам, и через запятую (оба формата живут в
   // settings.json) — промпт обязан понять оба и склеить в один список.

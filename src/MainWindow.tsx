@@ -27,6 +27,8 @@ import {
 import {
   buildActionTree,
   DEFAULT_TRANSLATE_LANGUAGES,
+  parseLanguageList,
+  translateSystem,
   type LeafNode,
   type PromptNode,
 } from './action-tree'
@@ -59,6 +61,7 @@ import {
   checkAccessibilityPermission,
   copyText,
   pasteText,
+  setMainTargetLanguage,
   openPrivacyPane,
   listRecentActions,
   touchRecentAction,
@@ -110,6 +113,7 @@ const toPasteCommandFormat = (choice: PasteChoice): PasteFormat =>
 // взялся этот текст» — единственное, что здесь нужно объяснить.
 const HISTORY_NOTICE = 'Loaded from history. The text that was here has been replaced.'
 const NEW_TEXT_NOTICE = 'New text arrived. The text that was here has been replaced.'
+const TRANSLATED_NOTICE = 'Translated by the AI. The original text has been replaced.'
 
 /** Главное окно: текст сверху (неподвижная часть интерфейса — см. бриф), под
  *  ним многоуровневое меню действий (Translate/Ask AI/Fix/Shorten/Summarize), каждое
@@ -151,6 +155,16 @@ export function MainWindow() {
     }
   }
 
+  // Автоперевод главного окна — НЕЗАВИСИМ от панели (своё поле настройки
+  // mainTargetLanguage): текст, пришедший по follow:text (захват/Follow),
+  // переводится в выбранный язык тем же промптом, что кнопка Translate. state
+  // для селектора, ref — для обработчика follow:text, навешенного раз на mount.
+  const [mainTargetLanguage, setMainTargetLanguageState] = useState('')
+  const mainTargetLanguageRef = useRef('')
+  // Идёт автоперевод. Не applyState: текст уже на экране, перевод заменяет его
+  // поверх с Undo, а не через цикл «предложено → принять».
+  const [translating, setTranslating] = useState(false)
+
   // Языки перевода — настройка, а не константа: из неё строится подменю
   // Translate (см. action-tree.ts). Держим сырую строку настройки, а дерево
   // пересобираем только когда она изменилась — иначе каждое settings:changed
@@ -158,6 +172,8 @@ export function MainWindow() {
   // бы меню в корень на ровном месте.
   const [rawLanguages, setRawLanguages] = useState(DEFAULT_TRANSLATE_LANGUAGES)
   const actionTree = useMemo(() => buildActionTree(rawLanguages), [rawLanguages])
+  // Языки для селектора автоперевода — из того же списка, что подменю Translate.
+  const translateLanguages = useMemo(() => parseLanguageList(rawLanguages), [rawLanguages])
   // Слушатель follow:text навешен один раз на монтировании и замыкает значения
   // того рендера — дерево ему нужно через ref, иначе после правки языков он
   // сбрасывал бы меню в корень УСТАРЕВШЕГО дерева. Остальные обработчики
@@ -327,6 +343,8 @@ export function MainWindow() {
       setMainPasteShortcut(s.mainPasteShortcut)
       setMainCopyShortcut(s.mainCopyShortcut)
       setAcceptShortcut(s.acceptShortcut)
+      setMainTargetLanguageState(s.mainTargetLanguage)
+      mainTargetLanguageRef.current = s.mainTargetLanguage
       // Строка, а не разобранный список: разбор и запасной дефолт живут в
       // одном месте (buildActionTree), а сравнение "поменялось ли" здесь
       // сводится к сравнению строк — новый массив узлов появляется только
@@ -430,6 +448,10 @@ export function MainWindow() {
       // другое. Шапку и доступность Paste перечитываем на каждый приход
       // текста, а не один раз на монтировании.
       refreshSourceApp()
+      // Автоперевод, если язык главного окна выбран: поверх только что
+      // показанного текста, тем же путём, что и панель. Язык не выбран —
+      // translateCaptured выходит сразу, без сети.
+      translateCaptured()
     })
     return () => {
       un.then((f) => f())
@@ -633,6 +655,49 @@ export function MainWindow() {
   // Копирование — тот же путь, что у Copy в Overlay.tsx: прав не требует,
   // работает даже когда Paste выключен (нет приложения-цели). Ошибку кладём в
   // общий actionError, успех — во временное подтверждение на самой кнопке.
+  // Автоперевод текста главного окна в выбранный язык — тем же промптом, что
+  // кнопка Translate (translateSystem сохраняет Markdown). Заменяет текст
+  // поверх с Undo, НЕ трогая цикл применения меню (proposed/accept). Язык из
+  // ref по умолчанию: функция зовётся и из follow:text, навешенного раз на
+  // mount. Защита «документ не менялся» закрывает гонку с правкой руками или
+  // новым захватом, пока ждём ответ провайдера (ср. refine в Overlay.tsx).
+  const translateCaptured = (langOverride?: string) => {
+    const lang = (langOverride ?? mainTargetLanguageRef.current).trim()
+    if (!lang) return
+    const view = viewRef.current
+    if (!view) return
+    const raw = view.state.doc.toString()
+    if (!raw.trim()) return
+    setTranslating(true)
+    setActionError(null)
+    runAiAction(translateSystem(lang), raw)
+      .then((translated) => {
+        const v = viewRef.current
+        if (!v || v.state.doc.toString() !== raw) return
+        if (translated === raw) return // модель ничего не поменяла — Undo соврал бы
+        resetEditorContent(v, translated)
+        setReplaced({ text: raw, message: TRANSLATED_NOTICE })
+      })
+      .catch((e) => setActionError(String(e)))
+      .finally(() => setTranslating(false))
+  }
+
+  // Смена языка автоперевода — постоянное предпочтение, узкой командой на диск
+  // (независимо от панели) и сразу к готовому тексту. Не вклиниваемся, если
+  // идёт действие меню (proposed/pending) или уже идёт перевод: иначе затёрли
+  // бы предложение ИИ, которое окно специально ждёт к Accept.
+  const onMainTargetLanguageChange = (lang: string) => {
+    const prev = mainTargetLanguageRef.current
+    setMainTargetLanguageState(lang)
+    mainTargetLanguageRef.current = lang
+    setMainTargetLanguage(lang).catch((e) => {
+      setMainTargetLanguageState(prev)
+      mainTargetLanguageRef.current = prev
+      setActionError(String(e))
+    })
+    if (lang && applyState.phase === 'idle' && !translating) translateCaptured(lang)
+  }
+
   const onCopy = () => {
     const value = currentText()
     if (!value) return
@@ -1412,6 +1477,34 @@ export function MainWindow() {
               No source app — dictate with the hotkey from the app you want the text in
             </span>
           )
+        )}
+        {/* Автоперевод главного окна — независимый от панели селектор языка.
+            Выбран язык → захваченный/набранный текст переводится в него (см.
+            onMainTargetLanguageChange / translateCaptured). Список — из того
+            же translate_languages, что и подменю Translate. Текущее значение
+            не из списка (список правили) добавляем пунктом, чтобы при
+            включённом переводе селектор не показывал пустоту. */}
+        {translateLanguages.length > 0 && (
+          <span className="mw-lang">
+            <span className="mw-lang-chip">To</span>
+            <select
+              className="mw-lang-select"
+              value={mainTargetLanguage}
+              disabled={translating}
+              aria-label="Target language — the AI translates the captured text into it"
+              onChange={(e) => onMainTargetLanguageChange(e.target.value)}
+            >
+              <option value="">No translation</option>
+              {mainTargetLanguage && !translateLanguages.includes(mainTargetLanguage) && (
+                <option value={mainTargetLanguage}>{mainTargetLanguage}</option>
+              )}
+              {translateLanguages.map((l) => (
+                <option key={l} value={l}>
+                  {l}
+                </option>
+              ))}
+            </select>
+          </span>
         )}
         {/* Выбор формата вставки — только для текста с разметкой. Это и есть
             «спросить, в каком формате вставить», но без модалки: три кнопки

@@ -102,6 +102,15 @@ export type Settings = {
   /** id of the active role, or `null` = editing off (the default): the
    *  whisper text goes to the user untouched and nothing hits the network. */
   dictorRole: string | null
+  /** Target language for auto-translation. Empty = off (the default): text
+   *  goes out as-is. Set = the same AI pass as the role translates the text
+   *  into it (see buildRoleSystemPrompt), with or without a role. A language
+   *  name, not a code — picked from translateLanguages in the panel. */
+  targetLanguage: string
+  /** Target language for the MAIN window, independent of targetLanguage:
+   *  captured/typed text there can translate into a different language than
+   *  dictation. Empty = off. Applied to text arriving via follow:text. */
+  mainTargetLanguage: string
   /** Smart Replace pairs, applied to the finished transcript on the
    *  frontend (see smart-replace.ts). Empty = the feature isn't set up. */
   smartReplaces: SmartReplace[]
@@ -289,6 +298,17 @@ export const cancelAiAction = () => invoke<void>('cancel_ai_action')
  *  `null` turns the AI pass off. Persists and emits `settings:changed`. */
 export const setDictorRole = (role: string | null) =>
   invoke<void>('set_dictor_role', { role })
+
+/** Target auto-translation language from the panel selector. Narrow command
+ *  for the same reason as setDictorRole. Empty string turns translation off.
+ *  Persists and emits `settings:changed`. */
+export const setTargetLanguage = (language: string) =>
+  invoke<void>('set_target_language', { language })
+
+/** Target auto-translation language for the MAIN window, independent of the
+ *  panel's. Empty string turns it off. Persists and emits `settings:changed`. */
+export const setMainTargetLanguage = (language: string) =>
+  invoke<void>('set_main_target_language', { language })
 
 /** Appends a finished transcript to the user's markdown journal. The entry
  *  arrives fully formatted (see journal.ts) — the backend only appends; the

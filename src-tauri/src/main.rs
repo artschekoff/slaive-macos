@@ -70,6 +70,8 @@ fn main() {
             commands::run_ai_action,
             commands::cancel_ai_action,
             commands::set_dictor_role,
+            commands::set_target_language,
+            commands::set_main_target_language,
             commands::append_journal,
             commands::license_status,
             commands::activate_license,

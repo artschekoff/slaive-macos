@@ -19,6 +19,7 @@ import {
   retranscribe,
   runAiAction,
   setDictorRole,
+  setTargetLanguage,
   setOverlayHasText,
   startRecording,
   stopRecording,
@@ -48,6 +49,7 @@ import {
   type AppRole,
   type DictorRole,
 } from './dictor-roles'
+import { parseLanguageList } from './action-tree'
 import { applySmartReplaces, type SmartReplace } from './smart-replace'
 import { formatJournalEntry } from './journal'
 import micIcon from './assets/mic.png'
@@ -220,8 +222,11 @@ const RETRANSCRIBE_NOTICE = 'Re-transcribed. The text that was here has been rep
 // Та же плашка для второй причины замены — ИИ-правки под роль диктора. Undo
 // возвращает сырой whisper-текст: правки руками за время запроса сюда попасть
 // не могут, при изменившемся документе правка не применяется вовсе (см.
-// проверку «документ не менялся» в refineWithRole).
+// проверку «документ не менялся» в refine).
 const ROLE_EDIT_NOTICE = 'Polished by the dictor role. The raw transcript has been replaced.'
+// Перевод мог идти и с ролью, и без неё; салиентная перемена — язык, поэтому
+// одна подпись на оба случая (см. refine ниже).
+const TRANSLATE_NOTICE = 'Translated by the AI. The original text has been replaced.'
 
 export function Overlay() {
   const [phase, setPhase] = useState<Phase>('idle')
@@ -320,6 +325,18 @@ export function Overlay() {
   // же приём, что pasteShortcutRef/copyShortcutRef ниже.
   const rolesRef = useRef<DictorRole[]>([])
   const activeRoleIdRef = useRef<string | null>(null)
+  // Язык автоперевода — постоянное предпочтение, как роль: state для селектора,
+  // ref для обработчика transcript, навешенного один раз на mount. Список
+  // доступных языков берётся из translate_languages (тот же, что у Translate в
+  // главном окне) — хранится отдельным state ради селектора.
+  const [targetLanguage, setTargetLanguageState] = useState('')
+  const targetLanguageRef = useRef('')
+  const [translateLanguages, setTranslateLanguages] = useState<string[]>([])
+  // Язык последней расшифровки — для правила «переводить, только если он
+  // отличается от целевого». Ref, а не state: обработчик transcript навешен
+  // раз на mount и читает его свежим; обновляется везде, где меняется
+  // `language` (расшифровка, повтор, сброс на rec:start).
+  const detectedLangRef = useRef<string | null>(null)
   // Пары Smart Replace — только ref, без state: списком панель ничего не
   // рендерит, он нужен лишь обработчикам transcript/retranscribe.
   const smartReplacesRef = useRef<SmartReplace[]>([])
@@ -403,6 +420,9 @@ export function Overlay() {
       setActiveRoleId(s.dictorRole)
       activeRoleIdRef.current = s.dictorRole
       savedRoleIdRef.current = s.dictorRole
+      setTargetLanguageState(s.targetLanguage)
+      targetLanguageRef.current = s.targetLanguage
+      setTranslateLanguages(parseLanguageList(s.translateLanguages))
       appRolesRef.current = s.appRoles
       smartReplacesRef.current = s.smartReplaces
       dictionaryRef.current = s.dictionary
@@ -429,16 +449,28 @@ export function Overlay() {
   // Читает роли через ref-ы: вызывается и из обработчика transcript,
   // навешенного один раз на mount. roleOverride — для смены роли селектором
   // на уже готовом тексте, когда ref мог ещё не обновиться.
-  const refineWithRole = (roleOverride?: DictorRole) => {
-    const role = roleOverride ?? findRole(rolesRef.current, activeRoleIdRef.current)
-    if (!role) return
+  const refine = (roleOverride?: DictorRole | null, langOverride?: string) => {
+    // roleOverride/langOverride переданы явно (смена селектора, авто-роль) —
+    // берём их; не переданы (undefined) — читаем ref. null у роли — это
+    // осознанное «без роли» (перевод-только), не «читай ref».
+    const role =
+      roleOverride !== undefined ? roleOverride : findRole(rolesRef.current, activeRoleIdRef.current)
+    const lang = (langOverride !== undefined ? langOverride : targetLanguageRef.current).trim()
+    // Переводим, только если целевой язык отличается от языка расшифровки:
+    // текст уже на нужном языке переводить незачем. Названия сравниваем без
+    // регистра; не совпали (whisper отдал код вместо имени) — переводим, это
+    // безопасный дефолт. Роль при совпадении языков всё равно отрабатывает.
+    const source = detectedLangRef.current
+    const effLang = lang && source && lang.toLowerCase() === source.toLowerCase() ? '' : lang
+    // Ни роли, ни (нужного) перевода — улучшать нечем, ни одного сетевого вызова.
+    if (!role && !effLang) return
     const view = viewRef.current
     if (!view) return
     const raw = view.state.doc.toString()
     if (!raw.trim()) return
     setRefining(true)
     setRefineError('')
-    runAiAction(buildRoleSystemPrompt(role, dictionaryRef.current), raw)
+    runAiAction(buildRoleSystemPrompt(role, dictionaryRef.current, effLang), raw)
       .then((fixed) => {
         const v = viewRef.current
         // Пока ждали ответ, документ сменился — новая запись, правка руками,
@@ -448,7 +480,7 @@ export function Overlay() {
         if (fixed === raw) return // модель ничего не поменяла — и плашка Undo соврала бы
         resetEditorContent(v, fixed)
         setReplaced(raw)
-        setReplacedNotice(ROLE_EDIT_NOTICE)
+        setReplacedNotice(effLang ? TRANSLATE_NOTICE : ROLE_EDIT_NOTICE)
         v.focus()
         // Журнал: плитка сессии держит правленый текст — иначе починка
         // терминов жила бы только до закрытия панели (тот же довод, что у
@@ -489,8 +521,25 @@ export function Overlay() {
     })
     if (roleId && phase === 'ready' && !refining) {
       const role = findRole(rolesRef.current, roleId)
-      if (role) refineWithRole(role)
+      if (role) refine(role)
     }
+  }
+
+  // Смена языка автоперевода — постоянное предпочтение, как роль: узкой
+  // командой на диск и сразу применяется к уже готовому тексту (выбрал язык,
+  // глядя на русскую расшифровку — хочешь её по-английски сейчас, не со
+  // следующей записи). Пустое значение выключает перевод и ничего не
+  // пересчитывает: обратно текст всё равно не вернуть, а сырой уже заменён.
+  const onTargetLanguageChange = (lang: string) => {
+    const prev = targetLanguageRef.current
+    setTargetLanguageState(lang)
+    targetLanguageRef.current = lang
+    setTargetLanguage(lang).catch((e) => {
+      setTargetLanguageState(prev)
+      targetLanguageRef.current = prev
+      setRefineError(String(e))
+    })
+    if (lang && phase === 'ready' && !refining) refine(undefined, lang)
   }
 
   // Скользящий максимум текущей записи — держит только высоту дорожки, не
@@ -654,6 +703,7 @@ export function Overlay() {
         // принудительный выбор разовым по построению, а не по договорённости:
         // следующая запись снова идёт по настройке, а ярлык «Forced» гаснет.
         setLanguage(null)
+        detectedLangRef.current = null
         // Снимок для Undo относится к документу, которого больше нет (при
         // новой записи поле очищается, при дозаписи — меняется), поэтому
         // предложение вернуть его теряет смысл вместе с началом записи.
@@ -786,9 +836,11 @@ export function Overlay() {
         // другой невозможно структурно. Здесь он всегда определённый, не
         // принудительный — принуждение бывает только через retranscribe.
         setLanguage(e.payload.language ? { name: e.payload.language, forced: false } : null)
+        detectedLangRef.current = e.payload.language ?? null
         setPhase('ready')
-        // ИИ-правка под активную роль — поверх уже показанного текста, см.
-        // refineWithRole. Роль не выбрана — вызов выходит сразу, без сети.
+        // ИИ-правка под активную роль и/или автоперевод — поверх уже
+        // показанного текста, см. refine. Ни роли, ни языка — вызов выходит
+        // сразу, без сети. targetLanguage refine читает из ref сам.
         lastDurationRef.current = e.payload.durationSecs
         // Авто-роль по приложению: запись началась поверх привязанного
         // приложения — эту расшифровку правит роль из привязки, и селектор
@@ -803,7 +855,7 @@ export function Overlay() {
         const effectiveId = autoRole ? autoRole.id : savedRoleIdRef.current
         setActiveRoleId(effectiveId)
         activeRoleIdRef.current = effectiveId
-        refineWithRole(autoRole ?? undefined)
+        refine(autoRole ?? undefined)
       }),
       listen<string>('rec:device-fallback', (e) => {
         setDeviceNotice(e.payload)
@@ -1018,6 +1070,7 @@ export function Overlay() {
         // дважды. Прежнее содержимое уходит под Undo строкой ниже.
         if (view) resetEditorContent(view, text)
         setLanguage(res.language ? { name: res.language, forced: res.forced } : null)
+        detectedLangRef.current = res.language ?? null
         // Пустое (или пробельное) прежнее содержимое возвращать незачем —
         // тот же порог, что в главном окне.
         setReplaced(previous.trim() ? previous : null)
@@ -1027,7 +1080,7 @@ export function Overlay() {
         // правит и его. Снимок Undo при этом сменится на пред-правочный —
         // последняя замена объясняется последней плашкой.
         lastDurationRef.current = res.durationSecs
-        refineWithRole()
+        refine()
         // Журнал: плитка этой сессии должна держать ИСПРАВЛЕННЫЙ текст, а не
         // бессмысленный от неверного языка — иначе починка языка живёт только
         // до закрытия панели. Растим ту же запись, что и дозаписи (одна
@@ -1676,7 +1729,7 @@ export function Overlay() {
           показывала языковую пару только в фазе ready и прижимала роль
           вправо — роль прыгала от левого края к правому на каждой
           расшифровке. */}
-      {(phase === 'ready' || retranscribing || roles.length > 0) && (
+      {(phase === 'ready' || retranscribing || roles.length > 0 || translateLanguages.length > 0) && (
         <div className="lang-row">
           {/* Селектор сбрасывается в пустое значение после каждого выбора
               (value="" — контролируемое): это кнопка-действие, а не поле
@@ -1731,6 +1784,35 @@ export function Overlay() {
                 ))}
               </select>
               <span className="shortcut-badge">{formatShortcutBadge(ROLE_SHORTCUT)}</span>
+            </span>
+          )}
+          {/* Язык автоперевода — постоянное предпочтение, как роль: выбрал
+              язык, и каждая расшифровка (и уже готовый текст) переводится в
+              него тем же ИИ-проходом (см. onTargetLanguageChange / refine).
+              Список — из translate_languages, что и подменю Translate главного
+              окна. Текущее значение, которого нет в списке (список правили в
+              настройках), добавляем отдельным пунктом, чтобы селектор не
+              показывал пустоту при включённом переводе. */}
+          {translateLanguages.length > 0 && (
+            <span className="role-group">
+              <span className="lang-chip">To</span>
+              <select
+                className="lang-force"
+                value={targetLanguage}
+                disabled={refining}
+                aria-label="Target language — the AI translates the transcript into it"
+                onChange={(e) => onTargetLanguageChange(e.target.value)}
+              >
+                <option value="">No translation</option>
+                {targetLanguage && !translateLanguages.includes(targetLanguage) && (
+                  <option value={targetLanguage}>{targetLanguage}</option>
+                )}
+                {translateLanguages.map((l) => (
+                  <option key={l} value={l}>
+                    {l}
+                  </option>
+                ))}
+              </select>
             </span>
           )}
           {/* Факт о языке — в конце строки у правого края: появляясь после

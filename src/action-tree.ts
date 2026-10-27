@@ -105,7 +105,9 @@ const SUMMARIZE_SYSTEM =
   'carry no point. Reply with only the summary, nothing else — no explanations, no ' +
   'preamble, no quotes around it.'
 
-const translateSystem = (language: string) =>
+// Экспортируется ради автоперевода главного окна (см. MainWindow.tsx): тот же
+// промпт, что у кнопки Translate, чтобы ручной и авто-перевод не разъезжались.
+export const translateSystem = (language: string) =>
   `You translate the given text to ${language}. Reply with only the translation, nothing else — no explanations, no quotes around it.` +
   PRESERVE_MARKDOWN
 const ASK_AI_SYSTEM =

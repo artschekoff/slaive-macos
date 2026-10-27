@@ -519,6 +519,51 @@ pub fn set_dictor_role(
     Ok(())
 }
 
+/// Язык автоперевода из селектора панели. Узкая команда по тем же доводам,
+/// что `set_dictor_role`: селектор живёт в панели без формы настроек, гонять
+/// одно поле через `save_settings` с перерегистрацией хоткеев не за что.
+/// Пустая строка — перевод выключен. Значение не валидируем против
+/// translate_languages: список там — лишь удобные пресеты, а язык по сути
+/// свободный текст, и «English» из устаревшего селектора всё равно переведётся.
+#[tauri::command]
+pub fn set_target_language(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    language: String,
+) -> Result<(), String> {
+    let settings = {
+        let mut s = state.settings.lock().unwrap();
+        s.target_language = language;
+        s.clone()
+    };
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+    let _ = app.emit_to("overlay", "settings:changed", settings);
+    Ok(())
+}
+
+/// Язык автоперевода ГЛАВНОГО окна — независимое от панели поле (см.
+/// settings::main_target_language). Та же узкая команда, что `set_target_language`,
+/// но селектор живёт в главном окне, поэтому событие шлём и туда, и в оверлей:
+/// оба окна-синглтона переживают показ/скрытие и держат свой state из диска.
+#[tauri::command]
+pub fn set_main_target_language(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    language: String,
+) -> Result<(), String> {
+    let settings = {
+        let mut s = state.settings.lock().unwrap();
+        s.main_target_language = language;
+        s.clone()
+    };
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+    let _ = app.emit_to("main", "settings:changed", settings.clone());
+    let _ = app.emit_to("overlay", "settings:changed", settings);
+    Ok(())
+}
+
 /// Миллисекунды UTC от эпохи — часы для триала (см. license.rs: модуль
 /// принимает время аргументом и сам часов не трогает).
 fn license_now_ms() -> u64 {
